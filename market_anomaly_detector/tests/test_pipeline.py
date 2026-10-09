@@ -72,3 +72,38 @@ def test_f1_beats_random_baseline(trained_pipeline):
     preds = pipeline.predict(test[FEATURE_COLS])
     f1 = f1_score(test['Y'], preds)
     assert f1 > 0.3, f"F1 {f1:.4f} is unexpectedly low — check pipeline."
+
+
+# ---- Calibration selection tests ----
+
+def test_calibration_method_is_valid(trained_pipeline):
+    """calibration_method_ must be one of the two supported methods after auto fit."""
+    pipeline, _, _ = trained_pipeline
+    assert pipeline.calibration_method_ in {"sigmoid", "isotonic"}
+
+
+def test_calibration_report_has_both_methods(trained_pipeline):
+    """calibration_report_ must contain finite oof_brier for both methods."""
+    import math
+    pipeline, _, _ = trained_pipeline
+    report = pipeline.calibration_report_
+    assert set(report.keys()) == {"sigmoid", "isotonic"}
+    for method, scores in report.items():
+        assert "oof_brier" in scores, f"Missing oof_brier for {method}"
+        assert math.isfinite(scores["oof_brier"]), f"oof_brier for {method} is not finite"
+
+
+def test_calibration_forced_isotonic():
+    """Forcing calibration='isotonic' sets calibration_method_='isotonic'."""
+    raw = load_data(str(DATA_PATH))
+    featured = engineer_features(raw)
+    train, val, _ = split_timeseries(featured)
+    pipeline = AnomalyPipeline(calibration="isotonic")
+    pipeline.fit(train[FEATURE_COLS], train['Y'], val[FEATURE_COLS], val['Y'])
+    assert pipeline.calibration_method_ == "isotonic"
+
+
+def test_calibration_invalid_raises():
+    """Passing an unknown calibration method raises ValueError in __init__."""
+    with pytest.raises(ValueError, match="platt"):
+        AnomalyPipeline(calibration="platt")

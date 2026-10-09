@@ -7,7 +7,8 @@ from sklearn.calibration import CalibratedClassifierCV
 from sklearn.frozen import FrozenEstimator
 from sklearn.ensemble import IsolationForest, RandomForestClassifier, StackingClassifier
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import classification_report, f1_score
+from sklearn.metrics import brier_score_loss, classification_report, f1_score, log_loss
+from sklearn.model_selection import StratifiedKFold
 from sklearn.preprocessing import StandardScaler
 from sklearn.tree import DecisionTreeClassifier
 
@@ -16,6 +17,8 @@ from .explain import SHAPExplainer
 
 # Augmented feature set: original engineered features + Isolation Forest score
 AUG_FEATURE_COLS = FEATURE_COLS + ['iso_score']
+
+_VALID_CALIBRATION = {"auto", "sigmoid", "isotonic"}
 
 
 class AnomalyPipeline:
@@ -26,7 +29,12 @@ class AnomalyPipeline:
                  augmented feature set, then calibrated on a held-out val split.
     """
 
-    def __init__(self):
+    def __init__(self, calibration: str = "auto"):
+        if calibration not in _VALID_CALIBRATION:
+            raise ValueError(
+                f"calibration must be one of {sorted(_VALID_CALIBRATION)!r}, got {calibration!r}"
+            )
+        self.calibration = calibration
         self.scaler = StandardScaler()
         self.iso_forest = IsolationForest(
             n_estimators=500,
@@ -47,6 +55,8 @@ class AnomalyPipeline:
         )
         self.calibrated: CalibratedClassifierCV | None = None
         self.explainer: SHAPExplainer | None = None
+        self.calibration_method_: str | None = None
+        self.calibration_report_: dict | None = None
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -61,6 +71,36 @@ class AnomalyPipeline:
         X_aug = X_scaled.copy()
         X_aug['iso_score'] = self.iso_forest.decision_function(X_scaled[FEATURE_COLS])
         return X_aug
+
+    def _oof_calibration_scores(
+        self,
+        X_v_aug: pd.DataFrame,
+        y_val: pd.Series,
+    ) -> dict:
+        """Compute OOF Brier score and log loss for sigmoid and isotonic on the val split."""
+        skf = StratifiedKFold(n_splits=5, shuffle=False)
+        frozen = FrozenEstimator(self._stacking)
+        report = {}
+
+        for method in ("sigmoid", "isotonic"):
+            oof_proba = np.zeros(len(y_val))
+            y_arr = np.array(y_val)
+
+            for train_idx, val_idx in skf.split(X_v_aug, y_arr):
+                X_fold_tr = X_v_aug.iloc[train_idx]
+                y_fold_tr = y_arr[train_idx]
+                X_fold_val = X_v_aug.iloc[val_idx]
+
+                cal = CalibratedClassifierCV(frozen, method=method)
+                cal.fit(X_fold_tr, y_fold_tr)
+                oof_proba[val_idx] = cal.predict_proba(X_fold_val)[:, 1]
+
+            report[method] = {
+                "oof_brier": float(brier_score_loss(y_arr, oof_proba)),
+                "oof_log_loss": float(log_loss(y_arr, oof_proba)),
+            }
+
+        return report
 
     # ------------------------------------------------------------------
     # Training
@@ -84,8 +124,19 @@ class AnomalyPipeline:
         # Stage 2: fit stacking classifier
         self._stacking.fit(X_tr_aug, y_train)
 
-        # Calibrate on validation set so predict_proba is meaningful
-        self.calibrated = CalibratedClassifierCV(FrozenEstimator(self._stacking), method='sigmoid')
+        # Calibration method selection
+        self.calibration_report_ = self._oof_calibration_scores(X_v_aug, y_val)
+
+        if self.calibration == "auto":
+            sig_brier = self.calibration_report_["sigmoid"]["oof_brier"]
+            iso_brier = self.calibration_report_["isotonic"]["oof_brier"]
+            # Tie-break in favour of sigmoid (fewer parameters)
+            chosen = "sigmoid" if sig_brier <= iso_brier else "isotonic"
+        else:
+            chosen = self.calibration
+
+        self.calibration_method_ = chosen
+        self.calibrated = CalibratedClassifierCV(FrozenEstimator(self._stacking), method=chosen)
         self.calibrated.fit(X_v_aug, y_val)
 
         # Build SHAP explainer once (expensive) — reused at inference time
@@ -164,7 +215,34 @@ class AnomalyPipeline:
 
     @classmethod
     def load(cls, path: str) -> AnomalyPipeline:
+        import json
+        import warnings
+        from pathlib import Path
+
         pipeline = joblib.load(path)
         if not isinstance(pipeline, cls):
             raise TypeError(f"Loaded object is {type(pipeline)}, expected AnomalyPipeline.")
+
+        sidecar = Path(path).with_suffix(".meta.json")
+        if sidecar.exists():
+            import sklearn
+            import shap as shap_mod
+            meta = json.loads(sidecar.read_text(encoding="utf-8"))
+            trained_sk = meta.get("versions", {}).get("scikit-learn")
+            trained_shap = meta.get("versions", {}).get("shap")
+            running_sk = sklearn.__version__
+            running_shap = shap_mod.__version__
+            if trained_sk and trained_sk != running_sk:
+                warnings.warn(
+                    f"Pipeline was trained with scikit-learn {trained_sk}, "
+                    f"running {running_sk}.",
+                    stacklevel=2,
+                )
+            if trained_shap and trained_shap != running_shap:
+                warnings.warn(
+                    f"Pipeline was trained with shap {trained_shap}, "
+                    f"running {running_shap}.",
+                    stacklevel=2,
+                )
+
         return pipeline
