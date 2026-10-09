@@ -1,1 +1,5 @@
-Claude Instructions
+/Claude Instructions/
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
