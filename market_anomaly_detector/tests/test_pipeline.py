@@ -107,3 +107,24 @@ def test_calibration_invalid_raises():
     """Passing an unknown calibration method raises ValueError in __init__."""
     with pytest.raises(ValueError, match="platt"):
         AnomalyPipeline(calibration="platt")
+
+
+# ---- Persistence round-trip test ----
+
+def test_save_load_round_trip(trained_pipeline, tmp_path):
+    """score() on the same input must be identical before and after save/load."""
+    pipeline, _, _ = trained_pipeline
+    raw = load_data(str(DATA_PATH))
+    input_window = raw.iloc[:50]
+
+    before = pipeline.score(input_window)
+
+    artifact = tmp_path / "pipeline.joblib"
+    pipeline.save(str(artifact))
+    loaded = AnomalyPipeline.load(str(artifact))
+
+    after = loaded.score(input_window)
+
+    assert before["anomaly"] == after["anomaly"]
+    assert before["confidence"] == after["confidence"]
+    assert before["top_features"] == after["top_features"]
