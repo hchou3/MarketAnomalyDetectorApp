@@ -1,0 +1,17 @@
+You are an expert financial data analyst. You have a time series dataset of stock prices at certain dates, with 'Data' representing the date, and 'Y' as a binary target that represents whether an anomaly occured in the stock market on that date.
+
+Your goal is to develop a model that detects anomalies in the stock market based on this time series data. Each feature other than the 'Data' column represents a stock ticker. Let's go through the process step by step.
+
+Step 1. Your first step is to find what each stock ticker represents in the data
+
+Step 2. Your second step is to analyze the values of the stock tickers at each date and how the values differ than usual when the binary target('Y') is '1' (1 means anomaly occured on that date).
+    This means you should look for outliers in the data such as sudden spikes in the prices of the stock tickers.
+    Contextualize anomalous dates from 2000 to 2021 by matching them with dates of known black swan events, such as (but not limited to) the Dot Com Bubble, 2008 Financial Crisis and the COVID-19 pandemic
+    In addition to the information from the dataset, you should consider the correlations of each stock ticker to the target column in your analysis. The list of correlations is given here:"{str(list(correlations))}
+    These correlations can help you make a more accurate analysis of whether if a stock ticker is more suited for anomaly detection or not.
+    Remember not to solely rely on the provided correlations as there may be other factors that can influence a stock ticker's reliability.
+
+Step 3. Your third step is to rank each of these stock tickers on reliability for anomaly detection. List out the top 15 most reliable and 15 least reliable stock tickers.
+Now, apply these steps in your analysis of the dataset. Do not just make suggestions or an outline, make sure to complete each step. Verify that the information in each step is correct.
+
+Do not give me hypothetical placeholder values anywhere, only use the tickers in the dataset
