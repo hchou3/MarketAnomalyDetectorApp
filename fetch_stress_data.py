@@ -4,7 +4,7 @@ import urllib.request
 
 import pandas as pd
 
-CBOE = "https://cdn.cboe.com/api/global/us_indices/daily_prices{}_History.csv"
+CBOE = "https://cdn.cboe.com/api/global/us_indices/daily_prices/{}_History.csv"
 FRED = "https://fred.stlouisfed.org/graph/fredgraph.csv?id={}"
 
 CBOE_SERIES = {
