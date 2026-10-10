@@ -21,8 +21,11 @@ import urllib.request
 
 import pandas as pd
 
-CBOE = "https://cdn.cboe.com/api/global/us_indices/daily_prices/{}_History.csv"
-FRED = "https://fred.stlouisfed.org/graph/fredgraph.csv?id={}"
+CBOE_URLS = [
+    "https://cdn.cboe.com/api/global/us_indices/daily_prices/{}_History.csv",
+    "https://cdn-api.cboe.com/api/global/us_indices/daily_prices/{}_History.csv",
+]
+FRED_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv?id={}"
 
 # Cboe symbol -> Yahoo ticker (fallback)
 CBOE_SERIES = {
