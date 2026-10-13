@@ -242,3 +242,88 @@ def test_schema_rejects_revised_without_notes():
 def test_schema_rejects_non_snake_case_id():
     with pytest.raises(Exception, match="snake_case"):
         Instrument.model_validate(_minimal_instrument(id="BadId"))
+
+
+# ── Fix 1: monthly source_frequency needs a realistic lag ─────────────────────
+
+
+def test_schema_rejects_monthly_source_with_short_lag():
+    with pytest.raises(Exception, match="28"):
+        SourceEntry.model_validate(
+            {
+                "provider": "fred",
+                "symbol": "IRLTLT01DEM156N",
+                "priority": 1,
+                "fidelity": "proxy",
+                "source_frequency": "monthly",
+                "publication_lag_days": 1,
+            }
+        )
+
+
+def test_schema_accepts_monthly_source_with_adequate_lag():
+    src = SourceEntry.model_validate(
+        {
+            "provider": "fred",
+            "symbol": "IRLTLT01DEM156N",
+            "priority": 1,
+            "fidelity": "proxy",
+            "source_frequency": "monthly",
+            "publication_lag_days": 40,
+        }
+    )
+    assert src.source_frequency.value == "monthly"
+
+
+def test_monthly_fred_proxies_have_source_frequency_and_adequate_lag(registry):
+    """de_10y_yield, it_10y_yield, jp_10y_yield FRED sources must not be treated as daily."""
+    monthly_instrument_ids = {"de_10y_yield", "it_10y_yield", "jp_10y_yield"}
+    for inst in registry:
+        if inst.id not in monthly_instrument_ids:
+            continue
+        fred_src = next((s for s in inst.sources if s.provider == "fred"), None)
+        assert fred_src is not None, f"{inst.id} has no FRED source"
+        assert (
+            fred_src.source_frequency is not None and fred_src.source_frequency.value == "monthly"
+        ), f"{inst.id} FRED source missing source_frequency=monthly"
+        assert fred_src.publication_lag_days >= 28, (
+            f"{inst.id} FRED source publication_lag_days={fred_src.publication_lag_days} is too short for monthly data"
+        )
+
+
+# ── Fix 2: extra="forbid" catches YAML typos ──────────────────────────────────
+
+
+def test_schema_rejects_unknown_source_field():
+    with pytest.raises(Exception):
+        SourceEntry.model_validate(
+            {
+                "provider": "fred",
+                "symbol": "DGS10",
+                "priority": 1,
+                "fidelity": "exact",
+                "fedelity": "exact",
+            }
+        )
+
+
+def test_schema_rejects_unknown_instrument_field():
+    with pytest.raises(Exception):
+        Instrument.model_validate(_minimal_instrument(typo_field="oops"))
+
+
+# ── Fix 3: FRED FX lag ────────────────────────────────────────────────────────
+
+
+def test_fred_fx_lag_at_least_three_days(registry):
+    """usd_jpy and gbp_usd FRED sources need lag > 1 to cover weekends (H.10 T+1 business day)."""
+    fx_ids = {"usd_jpy", "gbp_usd"}
+    for inst in registry:
+        if inst.id not in fx_ids:
+            continue
+        fred_src = next((s for s in inst.sources if s.provider == "fred"), None)
+        assert fred_src is not None, f"{inst.id} has no FRED source"
+        assert fred_src.publication_lag_days >= 3, (
+            f"{inst.id} FRED lag={fred_src.publication_lag_days}; "
+            "must be >= 3 to cover weekend gaps in H.10 release"
+        )
