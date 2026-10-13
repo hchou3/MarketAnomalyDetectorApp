@@ -1,0 +1,2 @@
+[console_scripts]
+mad-train = market_anomaly_detector.train:main
