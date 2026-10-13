@@ -1,0 +1,1039 @@
+# Instrument registry for Market Anomaly Detector
+#
+# Every instrument the app uses has one canonical entry here.
+# The bloomberg_ews source (priority 99) is historical reference only; it is
+# never used for live ingestion.  Live sources are tried in priority order.
+#
+# Field notes:
+#   fidelity: exact | proxy | unavailable
+#   unavailable sources must not carry a symbol field.
+#   revised: true requires a notes field explaining how revisions are handled.
+#
+# Sections: commodities · fx · volatility · us_rates · european_rates ·
+#           japan_rates · uk_rates · credit · equity_index · macro_index ·
+#           stress_series
+
+# ── Commodities ────────────────────────────────────────────────────────────────
+
+- id: gold
+  name: Gold spot (Bloomberg BGN)
+  asset_class: commodity
+  groups: [safe_haven_candidate, commodity]
+  units: price
+  quote: USD per troy oz
+  native_frequency: daily
+  sources:
+    - provider: yahoo
+      symbol: "GC=F"
+      priority: 1
+      fidelity: proxy
+      notes: Front-month gold futures; tracks spot within ~$5 but is not spot.
+    - provider: bloomberg_ews
+      symbol: "XAU BGNL"
+      priority: 99
+      fidelity: exact
+  valid_from: null
+  valid_to: null
+  notes: Bloomberg BGN spot is the reference; GC=F futures are the best public proxy.
+
+- id: wti_front
+  name: WTI crude oil, front-month futures (Bloomberg Cl1)
+  asset_class: commodity
+  groups: [commodity]
+  units: price
+  quote: USD per barrel
+  native_frequency: daily
+  sources:
+    - provider: yahoo
+      symbol: "CL=F"
+      priority: 1
+      fidelity: exact
+      notes: Same Bloomberg Cl1 contract.
+    - provider: fred
+      symbol: DCOILWTICO
+      priority: 2
+      fidelity: proxy
+      notes: Weekly EIA Cushing spot price, not futures; use as fallback only.
+    - provider: bloomberg_ews
+      symbol: Cl1
+      priority: 99
+      fidelity: exact
+  valid_from: null
+  valid_to: null
+  notes: ""
+
+- id: crb_commodity
+  name: Thomson Reuters/CoreCommodity CRB Index
+  asset_class: macro_index
+  groups: [commodity]
+  units: index_points
+  quote: Index level; higher = stronger commodity prices
+  native_frequency: daily
+  sources:
+    - provider: yahoo
+      symbol: DBC
+      priority: 1
+      fidelity: proxy
+      notes: Invesco DB Commodity ETF; available from 2006-02-03; tracks similar basket.
+    - provider: bloomberg_ews
+      symbol: CRY
+      priority: 99
+      fidelity: exact
+  valid_from: null
+  valid_to: null
+  notes: CRY (Reuters/Jefferies CRB) is the official index; DBC is the best public proxy.
+
+- id: baltic_dry
+  name: Baltic Dry Index
+  asset_class: macro_index
+  groups: [commodity]
+  units: index_points
+  quote: Index level; higher = stronger dry-bulk shipping demand
+  native_frequency: daily
+  sources:
+    - provider: bloomberg_ews
+      symbol: BDIY
+      priority: 99
+      fidelity: exact
+  valid_from: null
+  valid_to: null
+  notes: Baltic Exchange data is proprietary; no public real-time source identified.
+
+# ── FX ─────────────────────────────────────────────────────────────────────────
+
+- id: dollar_index
+  name: US Dollar Index (DXY)
+  asset_class: fx
+  groups: [fx]
+  units: index_points
+  quote: Index level; higher = stronger USD
+  native_frequency: daily
+  sources:
+    - provider: yahoo
+      symbol: DX-Y.NYB
+      priority: 1
+      fidelity: exact
+    - provider: bloomberg_ews
+      symbol: DXY
+      priority: 99
+      fidelity: exact
+  valid_from: null
+  valid_to: null
+  notes: ""
+
+- id: usd_jpy
+  name: US dollar / Japanese yen
+  asset_class: fx
+  groups: [safe_haven_candidate, fx]
+  units: price
+  quote: JPY per USD; higher = weaker yen
+  native_frequency: daily
+  sources:
+    - provider: fred
+      symbol: DEXJPUS
+      priority: 1
+      fidelity: exact
+      publication_lag_days: 1
+    - provider: yahoo
+      symbol: "JPY=X"
+      priority: 2
+      fidelity: exact
+    - provider: bloomberg_ews
+      symbol: JPY
+      priority: 99
+      fidelity: exact
+  valid_from: null
+  valid_to: null
+  notes: ""
+
+- id: gbp_usd
+  name: British pound / US dollar
+  asset_class: fx
+  groups: [fx]
+  units: price
+  quote: USD per GBP; higher = stronger GBP
+  native_frequency: daily
+  sources:
+    - provider: fred
+      symbol: DEXUSUK
+      priority: 1
+      fidelity: exact
+      publication_lag_days: 1
+    - provider: yahoo
+      symbol: "GBPUSD=X"
+      priority: 2
+      fidelity: exact
+    - provider: bloomberg_ews
+      symbol: GBP
+      priority: 99
+      fidelity: exact
+  valid_from: null
+  valid_to: null
+  notes: ""
+
+# ── Volatility ─────────────────────────────────────────────────────────────────
+
+- id: vix
+  name: CBOE Volatility Index
+  asset_class: volatility
+  groups: [stress_indicator, volatility]
+  units: index_points
+  quote: 30-day implied vol of S&P 500, annualised; higher = more fear
+  native_frequency: daily
+  sources:
+    - provider: cboe
+      symbol: VIX
+      priority: 1
+      fidelity: exact
+    - provider: yahoo
+      symbol: "^VIX"
+      priority: 2
+      fidelity: exact
+    - provider: fred
+      symbol: VIXCLS
+      priority: 3
+      fidelity: exact
+      publication_lag_days: 1
+    - provider: bloomberg_ews
+      symbol: VIX
+      priority: 99
+      fidelity: exact
+  valid_from: null
+  valid_to: null
+  notes: ""
+
+# ── US rates ───────────────────────────────────────────────────────────────────
+
+- id: us_30y_yield
+  name: US Treasury 30-year constant-maturity yield
+  asset_class: rate
+  groups: [safe_haven_candidate, us_rates]
+  units: percent
+  quote: Yield % per annum; higher = cheaper Treasuries
+  native_frequency: daily
+  sources:
+    - provider: fred
+      symbol: DGS30
+      priority: 1
+      fidelity: exact
+      publication_lag_days: 1
+      notes: Gap in series 2002-02-19 to 2006-02-09 (30Y was not issued).
+    - provider: yahoo
+      symbol: "^TYX"
+      priority: 2
+      fidelity: exact
+    - provider: bloomberg_ews
+      symbol: USGG30YR
+      priority: 99
+      fidelity: exact
+  valid_from: null
+  valid_to: null
+  notes: ""
+
+- id: us_10y_yield
+  name: US Treasury 10-year constant-maturity yield
+  asset_class: rate
+  groups: [safe_haven_candidate, us_rates]
+  units: percent
+  quote: Yield % per annum
+  native_frequency: daily
+  sources:
+    - provider: fred
+      symbol: DGS10
+      priority: 1
+      fidelity: exact
+      publication_lag_days: 1
+    - provider: yahoo
+      symbol: "^TNX"
+      priority: 2
+      fidelity: exact
+    - provider: bloomberg_ews
+      symbol: GT10
+      priority: 99
+      fidelity: exact
+  valid_from: null
+  valid_to: null
+  notes: ""
+
+- id: us_2y_yield
+  name: US Treasury 2-year constant-maturity yield
+  asset_class: rate
+  groups: [us_rates]
+  units: percent
+  quote: Yield % per annum
+  native_frequency: daily
+  sources:
+    - provider: fred
+      symbol: DGS2
+      priority: 1
+      fidelity: exact
+      publication_lag_days: 1
+    - provider: bloomberg_ews
+      symbol: USGG2YR
+      priority: 99
+      fidelity: exact
+  valid_from: null
+  valid_to: null
+  notes: ""
+
+- id: us_3m_yield
+  name: US Treasury 3-month constant-maturity yield
+  asset_class: rate
+  groups: [us_rates]
+  units: percent
+  quote: Yield % per annum
+  native_frequency: daily
+  sources:
+    - provider: fred
+      symbol: DGS3MO
+      priority: 1
+      fidelity: exact
+      publication_lag_days: 1
+    - provider: yahoo
+      symbol: "^IRX"
+      priority: 2
+      fidelity: exact
+    - provider: bloomberg_ews
+      symbol: USGG3M
+      priority: 99
+      fidelity: exact
+  valid_from: null
+  valid_to: null
+  notes: ""
+
+- id: usd_libor_1m
+  name: 1-month USD LIBOR
+  asset_class: rate
+  groups: [us_rates]
+  units: percent
+  quote: Rate % per annum
+  native_frequency: daily
+  sources:
+    - provider: bloomberg_ews
+      symbol: US0001M
+      priority: 99
+      fidelity: exact
+  valid_from: null
+  valid_to: "2023-06-30"
+  notes: Discontinued 2023-06-30. Successor is SOFR (FRED series SOFR), a separate instrument.
+
+# ── European rates ─────────────────────────────────────────────────────────────
+
+- id: de_30y_yield
+  name: Germany 30-year government bond yield
+  asset_class: rate
+  groups: [global_rates]
+  units: percent
+  quote: Yield % per annum
+  native_frequency: daily
+  sources:
+    - provider: bloomberg_ews
+      symbol: GTDEM30Y
+      priority: 99
+      fidelity: exact
+  valid_from: null
+  valid_to: null
+  notes: No public daily source identified.
+
+- id: de_10y_yield
+  name: Germany 10-year government bond yield (Bund)
+  asset_class: rate
+  groups: [safe_haven_candidate, global_rates]
+  units: percent
+  quote: Yield % per annum
+  native_frequency: daily
+  sources:
+    - provider: fred
+      symbol: IRLTLT01DEM156N
+      priority: 1
+      fidelity: proxy
+      notes: OECD monthly series; best available public source for the Bund.
+    - provider: bloomberg_ews
+      symbol: GTDEM10Y
+      priority: 99
+      fidelity: exact
+  valid_from: null
+  valid_to: null
+  notes: No public daily source; FRED monthly OECD series is the best available.
+
+- id: de_2y_yield
+  name: Germany 2-year government bond yield
+  asset_class: rate
+  groups: [global_rates]
+  units: percent
+  quote: Yield % per annum
+  native_frequency: daily
+  sources:
+    - provider: bloomberg_ews
+      symbol: GTDEM2Y
+      priority: 99
+      fidelity: exact
+  valid_from: null
+  valid_to: null
+  notes: No public daily source identified.
+
+- id: eonia
+  name: Euro Overnight Index Average (EONIA)
+  asset_class: rate
+  groups: [global_rates]
+  units: percent
+  quote: Rate % per annum
+  native_frequency: daily
+  sources:
+    - provider: bloomberg_ews
+      symbol: EONIA
+      priority: 99
+      fidelity: exact
+  valid_from: null
+  valid_to: "2022-01-03"
+  notes: Discontinued 2022-01-03. Successor is Euro Short-Term Rate (€STR) via ECB.
+
+- id: it_30y_yield
+  name: Italy 30-year government bond yield
+  asset_class: rate
+  groups: [stress_indicator, global_rates]
+  units: percent
+  quote: Yield % per annum; BTP-Bund spread is a key stress signal
+  native_frequency: daily
+  sources:
+    - provider: bloomberg_ews
+      symbol: GTITL30YR
+      priority: 99
+      fidelity: exact
+  valid_from: null
+  valid_to: null
+  notes: No public daily source identified.
+
+- id: it_10y_yield
+  name: Italy 10-year government bond yield (BTP)
+  asset_class: rate
+  groups: [stress_indicator, global_rates]
+  units: percent
+  quote: Yield % per annum; BTP-Bund spread is a key stress signal
+  native_frequency: daily
+  sources:
+    - provider: fred
+      symbol: IRLTLT01ITM156N
+      priority: 1
+      fidelity: proxy
+      notes: OECD monthly series only.
+    - provider: bloomberg_ews
+      symbol: GTITL10YR
+      priority: 99
+      fidelity: exact
+  valid_from: null
+  valid_to: null
+  notes: ""
+
+- id: it_2y_yield
+  name: Italy 2-year government bond yield
+  asset_class: rate
+  groups: [stress_indicator, global_rates]
+  units: percent
+  quote: Yield % per annum; currently a model feature
+  native_frequency: daily
+  sources:
+    - provider: bloomberg_ews
+      symbol: GTITL2YR
+      priority: 99
+      fidelity: exact
+  valid_from: null
+  valid_to: null
+  notes: No public daily source identified. Currently in FEATURE_COLS.
+
+# ── Japan rates ────────────────────────────────────────────────────────────────
+
+- id: jp_30y_yield
+  name: Japan 30-year government bond yield (JGB)
+  asset_class: rate
+  groups: [global_rates]
+  units: percent
+  quote: Yield % per annum
+  native_frequency: daily
+  sources:
+    - provider: bloomberg_ews
+      symbol: GTJPY30YR
+      priority: 99
+      fidelity: exact
+  valid_from: null
+  valid_to: null
+  notes: No public daily source identified.
+
+- id: jp_10y_yield
+  name: Japan 10-year government bond yield (JGB)
+  asset_class: rate
+  groups: [global_rates]
+  units: percent
+  quote: Yield % per annum
+  native_frequency: daily
+  sources:
+    - provider: fred
+      symbol: IRLTLT01JPM156N
+      priority: 1
+      fidelity: proxy
+      notes: OECD monthly series only.
+    - provider: bloomberg_ews
+      symbol: GTJPY10YR
+      priority: 99
+      fidelity: exact
+  valid_from: null
+  valid_to: null
+  notes: ""
+
+- id: jp_2y_yield
+  name: Japan 2-year government bond yield (JGB)
+  asset_class: rate
+  groups: [global_rates]
+  units: percent
+  quote: Yield % per annum
+  native_frequency: daily
+  sources:
+    - provider: bloomberg_ews
+      symbol: GTJPY2YR
+      priority: 99
+      fidelity: exact
+  valid_from: null
+  valid_to: null
+  notes: No public daily source identified.
+
+# ── UK rates ───────────────────────────────────────────────────────────────────
+
+- id: uk_30y_yield
+  name: UK 30-year government bond yield (Gilt)
+  asset_class: rate
+  groups: [global_rates]
+  units: percent
+  quote: Yield % per annum
+  native_frequency: daily
+  sources:
+    - provider: bloomberg_ews
+      symbol: GTGBP30Y
+      priority: 99
+      fidelity: exact
+  valid_from: null
+  valid_to: null
+  notes: No public daily source identified.
+
+- id: uk_20y_yield
+  name: UK 20-year government bond yield (Gilt)
+  asset_class: rate
+  groups: [global_rates]
+  units: percent
+  quote: Yield % per annum
+  native_frequency: daily
+  sources:
+    - provider: bloomberg_ews
+      symbol: GTGBP20Y
+      priority: 99
+      fidelity: exact
+  valid_from: null
+  valid_to: null
+  notes: No public daily source identified.
+
+- id: uk_2y_yield
+  name: UK 2-year government bond yield (Gilt)
+  asset_class: rate
+  groups: [global_rates]
+  units: percent
+  quote: Yield % per annum
+  native_frequency: daily
+  sources:
+    - provider: bloomberg_ews
+      symbol: GTGBP2Y
+      priority: 99
+      fidelity: exact
+  valid_from: null
+  valid_to: null
+  notes: No public daily source identified.
+
+# ── Credit / Bond total-return indices ────────────────────────────────────────
+
+- id: us_mbs_tr
+  name: Bloomberg US MBS Total Return Index
+  asset_class: credit
+  groups: [credit]
+  units: index_points
+  quote: Total return index level
+  native_frequency: daily
+  sources:
+    - provider: yahoo
+      symbol: MBB
+      priority: 1
+      fidelity: proxy
+      notes: iShares MBS ETF; available from 2007-03-16.
+    - provider: bloomberg_ews
+      symbol: LUMSTRUU
+      priority: 99
+      fidelity: exact
+  valid_from: null
+  valid_to: null
+  notes: ""
+
+- id: us_muni_tr
+  name: Bloomberg US Municipal Bond Total Return Index
+  asset_class: credit
+  groups: [credit]
+  units: index_points
+  quote: Total return index level
+  native_frequency: daily
+  sources:
+    - provider: yahoo
+      symbol: MUB
+      priority: 1
+      fidelity: proxy
+      notes: iShares National Muni Bond ETF; available from 2007-09-07.
+    - provider: bloomberg_ews
+      symbol: LMBITR
+      priority: 99
+      fidelity: exact
+  valid_from: null
+  valid_to: null
+  notes: ""
+
+- id: us_ig_corp_tr
+  name: Bloomberg US Investment-Grade Corporate Bond Total Return Index
+  asset_class: credit
+  groups: [credit]
+  units: index_points
+  quote: Total return index level
+  native_frequency: daily
+  sources:
+    - provider: yahoo
+      symbol: LQD
+      priority: 1
+      fidelity: proxy
+      notes: iShares iBoxx $ IG Corp Bond ETF; available from 2002-07-26.
+    - provider: bloomberg_ews
+      symbol: LUACTRUU
+      priority: 99
+      fidelity: exact
+  valid_from: null
+  valid_to: null
+  notes: ""
+
+- id: us_hy_corp_tr
+  name: Bloomberg US High-Yield Corporate Bond Total Return Index
+  asset_class: credit
+  groups: [stress_indicator, credit]
+  units: index_points
+  quote: Total return index level
+  native_frequency: daily
+  sources:
+    - provider: yahoo
+      symbol: HYG
+      priority: 1
+      fidelity: proxy
+      notes: iShares iBoxx $ HY Corp Bond ETF; available from 2007-04-11.
+    - provider: bloomberg_ews
+      symbol: LF98TRUU
+      priority: 99
+      fidelity: exact
+  valid_from: null
+  valid_to: null
+  notes: ""
+
+- id: global_hy_tr
+  name: Bloomberg Global High-Yield Total Return Index (candidate)
+  asset_class: credit
+  groups: [credit]
+  units: index_points
+  quote: Total return index level
+  native_frequency: daily
+  sources:
+    - provider: bloomberg_ews
+      symbol: LG30TRUU
+      priority: 99
+      fidelity: exact
+  valid_from: null
+  valid_to: null
+  notes: >
+    D5 (2026-10-13): LG30TRUU identity unconfirmed; marked unavailable for live
+    ingestion. The EWS series is retained as a historical reference.
+
+- id: pan_euro_agg_tr
+  name: Bloomberg Pan-European Aggregate Total Return Index (candidate)
+  asset_class: credit
+  groups: [credit]
+  units: index_points
+  quote: Total return index level
+  native_frequency: daily
+  sources:
+    - provider: bloomberg_ews
+      symbol: LP01TREU
+      priority: 99
+      fidelity: exact
+  valid_from: null
+  valid_to: null
+  notes: >
+    D5 (2026-10-13): LP01TREU identity unconfirmed; marked unavailable for live
+    ingestion. The EWS series is retained as a historical reference.
+
+- id: lf94_bond_tr
+  name: Unknown Bloomberg bond total-return index (LF94TRUU)
+  asset_class: credit
+  groups: [credit]
+  units: index_points
+  quote: Total return index level
+  native_frequency: daily
+  sources:
+    - provider: bloomberg_ews
+      symbol: LF94TRUU
+      priority: 99
+      fidelity: exact
+  valid_from: null
+  valid_to: null
+  notes: >
+    D5 (2026-10-13): LF94TRUU identity unknown; marked unavailable for live
+    ingestion. The EWS series is retained as a historical reference.
+
+- id: em_usd_bond_tr
+  name: Bloomberg Emerging Markets USD Bond Total Return Index
+  asset_class: credit
+  groups: [stress_indicator, credit]
+  units: index_points
+  quote: Total return index level
+  native_frequency: daily
+  sources:
+    - provider: yahoo
+      symbol: EMB
+      priority: 1
+      fidelity: proxy
+      notes: iShares JP Morgan EM Bond ETF; available from 2007-12-19.
+    - provider: bloomberg_ews
+      symbol: EMUSTRUU
+      priority: 99
+      fidelity: exact
+  valid_from: null
+  valid_to: null
+  notes: ""
+
+# ── MSCI equity indices ────────────────────────────────────────────────────────
+
+- id: msci_usa
+  name: MSCI USA Index
+  asset_class: equity_index
+  groups: [equity_index]
+  units: index_points
+  quote: Index level in USD
+  native_frequency: daily
+  sources:
+    - provider: yahoo
+      symbol: "^GSPC"
+      priority: 1
+      fidelity: proxy
+      notes: S&P 500 is a close proxy for MSCI USA.
+    - provider: bloomberg_ews
+      symbol: MXUS
+      priority: 99
+      fidelity: exact
+  valid_from: null
+  valid_to: null
+  notes: ""
+
+- id: msci_europe
+  name: MSCI Europe Index
+  asset_class: equity_index
+  groups: [equity_index]
+  units: index_points
+  quote: Index level in USD
+  native_frequency: daily
+  sources:
+    - provider: yahoo
+      symbol: VGK
+      priority: 1
+      fidelity: proxy
+      notes: Vanguard FTSE Europe ETF; available from 2005-03-04.
+    - provider: bloomberg_ews
+      symbol: MXEU
+      priority: 99
+      fidelity: exact
+  valid_from: null
+  valid_to: null
+  notes: ""
+
+- id: msci_japan
+  name: MSCI Japan Index
+  asset_class: equity_index
+  groups: [equity_index]
+  units: index_points
+  quote: Index level in USD
+  native_frequency: daily
+  sources:
+    - provider: yahoo
+      symbol: EWJ
+      priority: 1
+      fidelity: proxy
+      notes: iShares MSCI Japan ETF.
+    - provider: bloomberg_ews
+      symbol: MXJP
+      priority: 99
+      fidelity: exact
+  valid_from: null
+  valid_to: null
+  notes: ""
+
+- id: msci_brazil
+  name: MSCI Brazil Index
+  asset_class: equity_index
+  groups: [equity_index]
+  units: index_points
+  quote: Index level in USD
+  native_frequency: daily
+  sources:
+    - provider: yahoo
+      symbol: EWZ
+      priority: 1
+      fidelity: proxy
+      notes: iShares MSCI Brazil ETF.
+    - provider: bloomberg_ews
+      symbol: MXBR
+      priority: 99
+      fidelity: exact
+  valid_from: null
+  valid_to: null
+  notes: ""
+
+- id: msci_russia
+  name: MSCI Russia Index
+  asset_class: equity_index
+  groups: [equity_index]
+  units: index_points
+  quote: Index level in USD
+  native_frequency: daily
+  sources:
+    - provider: bloomberg_ews
+      symbol: MXRU
+      priority: 99
+      fidelity: exact
+  valid_from: null
+  valid_to: "2022-03-09"
+  notes: MSCI removed Russia from all indexes on 2022-03-09. ETF proxies (ERUS, RSX) were delisted.
+
+- id: msci_india
+  name: MSCI India Index
+  asset_class: equity_index
+  groups: [equity_index]
+  units: index_points
+  quote: Index level in USD
+  native_frequency: daily
+  sources:
+    - provider: yahoo
+      symbol: INDA
+      priority: 1
+      fidelity: proxy
+      notes: iShares MSCI India ETF; available from 2012-02-09.
+    - provider: bloomberg_ews
+      symbol: MXIN
+      priority: 99
+      fidelity: exact
+  valid_from: null
+  valid_to: null
+  notes: ""
+
+- id: msci_china
+  name: MSCI China Index
+  asset_class: equity_index
+  groups: [equity_index]
+  units: index_points
+  quote: Index level in USD
+  native_frequency: daily
+  sources:
+    - provider: yahoo
+      symbol: MCHI
+      priority: 1
+      fidelity: proxy
+      notes: iShares MSCI China ETF; available from 2011-03-29.
+    - provider: bloomberg_ews
+      symbol: MXCN
+      priority: 99
+      fidelity: exact
+  valid_from: null
+  valid_to: null
+  notes: ""
+
+# ── Macro index ────────────────────────────────────────────────────────────────
+
+- id: us_econ_surprise
+  name: Citi US Economic Surprise Index
+  asset_class: macro_index
+  groups: [macro_index]
+  units: index_points
+  quote: Z-score; positive = data beat expectations
+  native_frequency: daily
+  sources:
+    - provider: bloomberg_ews
+      symbol: ECSURPUS
+      priority: 99
+      fidelity: exact
+  valid_from: null
+  valid_to: null
+  notes: Citigroup proprietary index; no public real-time source available.
+
+# ── Stress series (from stress_extra.csv) ─────────────────────────────────────
+# These are new instruments not in the EWS CSV.
+# bloomberg_ews source is omitted; they have no EWS column.
+
+- id: vix3m
+  name: CBOE 3-Month Volatility Index (VIX3M)
+  asset_class: volatility
+  groups: [stress_indicator, volatility]
+  units: index_points
+  quote: 93-day implied vol of S&P 500, annualised
+  native_frequency: daily
+  sources:
+    - provider: cboe
+      symbol: VIX3M
+      priority: 1
+      fidelity: exact
+    - provider: yahoo
+      symbol: "^VIX3M"
+      priority: 2
+      fidelity: exact
+  valid_from: null
+  valid_to: null
+  notes: ""
+
+- id: vix9d
+  name: CBOE 9-Day Volatility Index (VIX9D)
+  asset_class: volatility
+  groups: [stress_indicator, volatility]
+  units: index_points
+  quote: 9-day implied vol of S&P 500, annualised
+  native_frequency: daily
+  sources:
+    - provider: cboe
+      symbol: VIX9D
+      priority: 1
+      fidelity: exact
+    - provider: yahoo
+      symbol: "^VIX9D"
+      priority: 2
+      fidelity: exact
+  valid_from: null
+  valid_to: null
+  notes: ""
+
+- id: vvix
+  name: CBOE VVIX Index (vol-of-vol)
+  asset_class: volatility
+  groups: [stress_indicator, volatility]
+  units: index_points
+  quote: 30-day implied vol of VIX options, annualised
+  native_frequency: daily
+  sources:
+    - provider: cboe
+      symbol: VVIX
+      priority: 1
+      fidelity: exact
+    - provider: yahoo
+      symbol: "^VVIX"
+      priority: 2
+      fidelity: exact
+  valid_from: null
+  valid_to: null
+  notes: ""
+
+- id: skew
+  name: CBOE Skew Index
+  asset_class: volatility
+  groups: [stress_indicator, volatility]
+  units: index_points
+  quote: Tail risk of S&P 500; higher = more left-tail concern
+  native_frequency: daily
+  sources:
+    - provider: cboe
+      symbol: SKEW
+      priority: 1
+      fidelity: exact
+    - provider: yahoo
+      symbol: "^SKEW"
+      priority: 2
+      fidelity: exact
+  valid_from: null
+  valid_to: null
+  notes: ""
+
+- id: ovx
+  name: CBOE Crude Oil Volatility Index (OVX)
+  asset_class: volatility
+  groups: [stress_indicator, volatility]
+  units: index_points
+  quote: 30-day implied vol of WTI crude oil, annualised
+  native_frequency: daily
+  sources:
+    - provider: cboe
+      symbol: OVX
+      priority: 1
+      fidelity: exact
+    - provider: yahoo
+      symbol: "^OVX"
+      priority: 2
+      fidelity: exact
+  valid_from: null
+  valid_to: null
+  notes: ""
+
+- id: gvz
+  name: CBOE Gold Volatility Index (GVZ)
+  asset_class: volatility
+  groups: [stress_indicator, volatility]
+  units: index_points
+  quote: 30-day implied vol of gold, annualised
+  native_frequency: daily
+  sources:
+    - provider: cboe
+      symbol: GVZ
+      priority: 1
+      fidelity: exact
+    - provider: yahoo
+      symbol: "^GVZ"
+      priority: 2
+      fidelity: exact
+  valid_from: null
+  valid_to: null
+  notes: ""
+
+- id: nfci
+  name: Chicago Fed National Financial Conditions Index (NFCI)
+  asset_class: macro_index
+  groups: [stress_indicator, macro_index]
+  units: index_points
+  quote: Z-score; positive = tighter/riskier conditions than average
+  native_frequency: weekly
+  sources:
+    - provider: fred
+      symbol: NFCI
+      priority: 1
+      fidelity: exact
+      publication_lag_days: 11
+      revised: true
+      notes: >
+        Friday-dated; available the following Wednesday (~11 days after obs_date).
+        NFCI is revised by the Chicago Fed after initial release; historical values
+        change. Ingestion records current-vintage values. Phase 2 will decide whether
+        to track vintages (open decision 11).
+  valid_from: null
+  valid_to: null
+  notes: ""
+
+- id: stlfsi
+  name: St. Louis Fed Financial Stress Index (STLFSI)
+  asset_class: macro_index
+  groups: [stress_indicator, macro_index]
+  units: index_points
+  quote: Z-score; positive = above-average financial stress
+  native_frequency: weekly
+  sources:
+    - provider: fred
+      symbol: STLFSI4
+      priority: 1
+      fidelity: exact
+      publication_lag_days: 11
+      revised: true
+      notes: >
+        Friday-dated; same 11-day publication-lag rule as NFCI.
+        STLFSI4 is the current version (revised methodology from the original STLFSI2).
+        Mark revised: true pending confirmation of revision frequency.
+  valid_from: null
+  valid_to: null
+  notes: ""

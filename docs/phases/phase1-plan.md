@@ -2,7 +2,7 @@
 
 **Parent plan:** `architecture-plan.md`, section 6, Phase 1 (specs in 4.1, 4.2, 5.1).
 **Written:** 2026-10-13, against `main` + `phase1-fixes` + `walk-forward-backtest`.
-**Prerequisite:** Phase 0 merged.
+**Prerequisite:** Phase 0 merged (PR #3).
 **Branches:** one branch and PR per step (`phase-1/<step>`), merged in order.
 
 ## Goal
@@ -286,11 +286,11 @@ the YAML fidelity values match the report.
 
 | # | Decision | Default |
 |---|---|---|
-| D1 | Postgres from Phase 1, or a lighter store (SQLite/DuckDB) first? | Postgres in Compose. It's the target, and schema/upsert behavior differs enough that switching later costs more than starting with it |
+| D1 | Postgres from Phase 1, or a lighter store (SQLite/DuckDB) first? | **Decided 2026-10-13: Postgres** in Docker Compose |
 | D2 | Store raw or transformed values | Raw; transforms at feature time |
 | D3 | Revised FRED series (open decision 11) | Ingest current history now, mark `revised: true`; Phase 2 doesn't use them as features until decided |
 | D4 | Primary source when FRED and Yahoo both cover an instrument | FRED for rates and FX (official, long history); Yahoo for indices, futures, ETFs |
-| D5 | Unclear Bloomberg codes (LG30TRUU, LP01TREU, LF94TRUU) | `unavailable` with a note until the user confirms what they are |
+| D5 | Unclear Bloomberg codes (LG30TRUU, LP01TREU, LF94TRUU) | **Decided 2026-10-13:** `unavailable`, with a note that the index is unidentified. They stay in the EWS data as `bloomberg_ews` series |
 | D6 | Keep `stress_extra.csv` after parity? | Keep as a frozen snapshot in `data/raw/` with its fetch date; delete the script |
 | D7 | Labels for 2021-05 onward (open decision 1) | Not decided in Phase 1; the `labels` table supports adding a new label set later |
 
