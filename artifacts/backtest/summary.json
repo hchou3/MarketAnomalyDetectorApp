@@ -1,0 +1,525 @@
+{
+  "n_folds": 14,
+  "test_period": [
+    "2008-01-01",
+    "2021-04-20"
+  ],
+  "n_test_weeks": 695,
+  "n_test_anomalies": 153,
+  "pooled": {
+    "ensemble": {
+      "tp": 86,
+      "fp": 33,
+      "fn": 67,
+      "tn": 509,
+      "precision": 0.7226890756302521,
+      "recall": 0.5620915032679739,
+      "f1": 0.6323529411764707,
+      "false_alarm_rate": 0.06088560885608856
+    },
+    "baseline_isolation_forest": {
+      "tp": 115,
+      "fp": 240,
+      "fn": 38,
+      "tn": 302,
+      "precision": 0.323943661971831,
+      "recall": 0.7516339869281046,
+      "f1": 0.45275590551181105,
+      "false_alarm_rate": 0.44280442804428044
+    },
+    "always_flag_anomaly": {
+      "tp": 153,
+      "fp": 542,
+      "fn": 0,
+      "tn": 0,
+      "precision": 0.22014388489208633,
+      "recall": 1.0,
+      "f1": 0.3608490566037736,
+      "false_alarm_rate": 1.0
+    },
+    "ensemble_brier": 0.10341337246603696
+  },
+  "threshold_free": {
+    "ensemble_pr_auc": 0.714432370945059,
+    "baseline_pr_auc": 0.6153199577226469,
+    "ensemble_roc_auc": 0.8803571859248004,
+    "baseline_roc_auc": 0.7684562139739044,
+    "prevalence": 0.22014388489208633
+  },
+  "per_year_f1": {
+    "note": "Mean/std over years that contain at least one anomaly; F1 is undefined otherwise.",
+    "ensemble_mean": 0.4468410672266292,
+    "ensemble_std": 0.3630260849391541,
+    "baseline_mean": 0.447096575177561,
+    "baseline_std": 0.27348435378222824,
+    "years_ensemble_better": 6,
+    "years_baseline_better": 3,
+    "years_tied": 1,
+    "n_years": 10
+  },
+  "bootstrap": {
+    "n_boot": 2000,
+    "unit": "calendar test year",
+    "ensemble_f1_ci95": [
+      0.36557859703020995,
+      0.7800035460992908
+    ],
+    "baseline_f1_ci95": [
+      0.25748657393883556,
+      0.5833445945945945
+    ],
+    "f1_diff_ci95": [
+      -0.0976027353082628,
+      0.4145908340884204
+    ],
+    "p_ensemble_better": 0.915
+  },
+  "calibration_methods_chosen": {
+    "sigmoid": 11,
+    "isotonic": 3
+  },
+  "config": {
+    "first_test_year": 2008,
+    "last_test_year": null,
+    "val_years": 2,
+    "min_val_positives": 8,
+    "calibration": "auto",
+    "decision_threshold": 0.5,
+    "baseline_features": [
+      "VIX",
+      "USD_Over_100",
+      "XAU BGNL_cross"
+    ]
+  },
+  "folds": [
+    {
+      "test_year": 2008,
+      "val_lo": 293,
+      "test_lo": 397,
+      "test_hi": 450,
+      "val_start_year": 2006,
+      "val_positives": 8,
+      "val_negatives": 96,
+      "train_start": "2000-05-23",
+      "train_end": "2005-12-27",
+      "val_start": "2006-01-03",
+      "val_end": "2007-12-25",
+      "test_start": "2008-01-01",
+      "test_end": "2008-12-30",
+      "n_train": 293,
+      "n_val": 104,
+      "n_test": 53,
+      "calibration_method": "isotonic",
+      "calibration_report": {
+        "sigmoid": {
+          "oof_brier": 0.10913868897630938,
+          "oof_log_loss": 0.37317023591180004
+        },
+        "isotonic": {
+          "oof_brier": 0.09950362229945278,
+          "oof_log_loss": 0.6001609749662206
+        }
+      },
+      "fit_seconds": 5.07
+    },
+    {
+      "test_year": 2009,
+      "val_lo": 345,
+      "test_lo": 450,
+      "test_hi": 502,
+      "val_start_year": 2007,
+      "val_positives": 33,
+      "val_negatives": 72,
+      "train_start": "2000-05-23",
+      "train_end": "2006-12-26",
+      "val_start": "2007-01-02",
+      "val_end": "2008-12-30",
+      "test_start": "2009-01-06",
+      "test_end": "2009-12-29",
+      "n_train": 345,
+      "n_val": 105,
+      "n_test": 52,
+      "calibration_method": "sigmoid",
+      "calibration_report": {
+        "sigmoid": {
+          "oof_brier": 0.14437421871062783,
+          "oof_log_loss": 0.44011647018483024
+        },
+        "isotonic": {
+          "oof_brier": 0.15913135291927677,
+          "oof_log_loss": 1.0852013551867004
+        }
+      },
+      "fit_seconds": 4.83
+    },
+    {
+      "test_year": 2010,
+      "val_lo": 397,
+      "test_lo": 502,
+      "test_hi": 554,
+      "val_start_year": 2008,
+      "val_positives": 47,
+      "val_negatives": 58,
+      "train_start": "2000-05-23",
+      "train_end": "2007-12-25",
+      "val_start": "2008-01-01",
+      "val_end": "2009-12-29",
+      "test_start": "2010-01-05",
+      "test_end": "2010-12-28",
+      "n_train": 397,
+      "n_val": 105,
+      "n_test": 52,
+      "calibration_method": "sigmoid",
+      "calibration_report": {
+        "sigmoid": {
+          "oof_brier": 0.1546588007328389,
+          "oof_log_loss": 0.4809803787550428
+        },
+        "isotonic": {
+          "oof_brier": 0.20026310715295495,
+          "oof_log_loss": 0.9338823094736255
+        }
+      },
+      "fit_seconds": 4.61
+    },
+    {
+      "test_year": 2011,
+      "val_lo": 450,
+      "test_lo": 554,
+      "test_hi": 606,
+      "val_start_year": 2009,
+      "val_positives": 34,
+      "val_negatives": 70,
+      "train_start": "2000-05-23",
+      "train_end": "2008-12-30",
+      "val_start": "2009-01-06",
+      "val_end": "2010-12-28",
+      "test_start": "2011-01-04",
+      "test_end": "2011-12-27",
+      "n_train": 450,
+      "n_val": 104,
+      "n_test": 52,
+      "calibration_method": "sigmoid",
+      "calibration_report": {
+        "sigmoid": {
+          "oof_brier": 0.10278911818073158,
+          "oof_log_loss": 0.3491262198482279
+        },
+        "isotonic": {
+          "oof_brier": 0.10826842879620036,
+          "oof_log_loss": 0.9992616239224508
+        }
+      },
+      "fit_seconds": 4.51
+    },
+    {
+      "test_year": 2012,
+      "val_lo": 502,
+      "test_lo": 606,
+      "test_hi": 658,
+      "val_start_year": 2010,
+      "val_positives": 38,
+      "val_negatives": 66,
+      "train_start": "2000-05-23",
+      "train_end": "2009-12-29",
+      "val_start": "2010-01-05",
+      "val_end": "2011-12-27",
+      "test_start": "2012-01-03",
+      "test_end": "2012-12-25",
+      "n_train": 502,
+      "n_val": 104,
+      "n_test": 52,
+      "calibration_method": "sigmoid",
+      "calibration_report": {
+        "sigmoid": {
+          "oof_brier": 0.1249813495262593,
+          "oof_log_loss": 0.42701166992521133
+        },
+        "isotonic": {
+          "oof_brier": 0.12973612416923666,
+          "oof_log_loss": 1.3563452541933763
+        }
+      },
+      "fit_seconds": 4.64
+    },
+    {
+      "test_year": 2013,
+      "val_lo": 554,
+      "test_lo": 658,
+      "test_hi": 711,
+      "val_start_year": 2011,
+      "val_positives": 51,
+      "val_negatives": 53,
+      "train_start": "2000-05-23",
+      "train_end": "2010-12-28",
+      "val_start": "2011-01-04",
+      "val_end": "2012-12-25",
+      "test_start": "2013-01-01",
+      "test_end": "2013-12-31",
+      "n_train": 554,
+      "n_val": 104,
+      "n_test": 53,
+      "calibration_method": "sigmoid",
+      "calibration_report": {
+        "sigmoid": {
+          "oof_brier": 0.14829894601965585,
+          "oof_log_loss": 0.48752927261843987
+        },
+        "isotonic": {
+          "oof_brier": 0.15416125498842884,
+          "oof_log_loss": 1.7527660268869982
+        }
+      },
+      "fit_seconds": 4.93
+    },
+    {
+      "test_year": 2014,
+      "val_lo": 606,
+      "test_lo": 711,
+      "test_hi": 763,
+      "val_start_year": 2012,
+      "val_positives": 27,
+      "val_negatives": 78,
+      "train_start": "2000-05-23",
+      "train_end": "2011-12-27",
+      "val_start": "2012-01-03",
+      "val_end": "2013-12-31",
+      "test_start": "2014-01-07",
+      "test_end": "2014-12-30",
+      "n_train": 606,
+      "n_val": 105,
+      "n_test": 52,
+      "calibration_method": "sigmoid",
+      "calibration_report": {
+        "sigmoid": {
+          "oof_brier": 0.11431129797643698,
+          "oof_log_loss": 0.3512251430594269
+        },
+        "isotonic": {
+          "oof_brier": 0.14190401839938574,
+          "oof_log_loss": 2.6140953637156366
+        }
+      },
+      "fit_seconds": 4.77
+    },
+    {
+      "test_year": 2015,
+      "val_lo": 606,
+      "test_lo": 763,
+      "test_hi": 815,
+      "val_start_year": 2012,
+      "val_positives": 29,
+      "val_negatives": 128,
+      "train_start": "2000-05-23",
+      "train_end": "2011-12-27",
+      "val_start": "2012-01-03",
+      "val_end": "2014-12-30",
+      "test_start": "2015-01-06",
+      "test_end": "2015-12-29",
+      "n_train": 606,
+      "n_val": 157,
+      "n_test": 52,
+      "calibration_method": "sigmoid",
+      "calibration_report": {
+        "sigmoid": {
+          "oof_brier": 0.10109393045175816,
+          "oof_log_loss": 0.33434356872049187
+        },
+        "isotonic": {
+          "oof_brier": 0.1266314635922605,
+          "oof_log_loss": 2.7229666467865865
+        }
+      },
+      "fit_seconds": 5.01
+    },
+    {
+      "test_year": 2016,
+      "val_lo": 711,
+      "test_lo": 815,
+      "test_hi": 867,
+      "val_start_year": 2014,
+      "val_positives": 8,
+      "val_negatives": 96,
+      "train_start": "2000-05-23",
+      "train_end": "2013-12-31",
+      "val_start": "2014-01-07",
+      "val_end": "2015-12-29",
+      "test_start": "2016-01-05",
+      "test_end": "2016-12-27",
+      "n_train": 711,
+      "n_val": 104,
+      "n_test": 52,
+      "calibration_method": "sigmoid",
+      "calibration_report": {
+        "sigmoid": {
+          "oof_brier": 0.059472828453848194,
+          "oof_log_loss": 0.24240457345861743
+        },
+        "isotonic": {
+          "oof_brier": 0.06127459633339841,
+          "oof_log_loss": 0.24888391878295513
+        }
+      },
+      "fit_seconds": 5.06
+    },
+    {
+      "test_year": 2017,
+      "val_lo": 763,
+      "test_lo": 867,
+      "test_hi": 919,
+      "val_start_year": 2015,
+      "val_positives": 10,
+      "val_negatives": 94,
+      "train_start": "2000-05-23",
+      "train_end": "2014-12-30",
+      "val_start": "2015-01-06",
+      "val_end": "2016-12-27",
+      "test_start": "2017-01-03",
+      "test_end": "2017-12-26",
+      "n_train": 763,
+      "n_val": 104,
+      "n_test": 52,
+      "calibration_method": "sigmoid",
+      "calibration_report": {
+        "sigmoid": {
+          "oof_brier": 0.07048272468979355,
+          "oof_log_loss": 0.2557802474327563
+        },
+        "isotonic": {
+          "oof_brier": 0.08367899754567219,
+          "oof_log_loss": 0.9239967240421392
+        }
+      },
+      "fit_seconds": 5.17
+    },
+    {
+      "test_year": 2018,
+      "val_lo": 763,
+      "test_lo": 919,
+      "test_hi": 971,
+      "val_start_year": 2015,
+      "val_positives": 10,
+      "val_negatives": 146,
+      "train_start": "2000-05-23",
+      "train_end": "2014-12-30",
+      "val_start": "2015-01-06",
+      "val_end": "2017-12-26",
+      "test_start": "2018-01-02",
+      "test_end": "2018-12-25",
+      "n_train": 763,
+      "n_val": 156,
+      "n_test": 52,
+      "calibration_method": "sigmoid",
+      "calibration_report": {
+        "sigmoid": {
+          "oof_brier": 0.05669536824216031,
+          "oof_log_loss": 0.2024493920336265
+        },
+        "isotonic": {
+          "oof_brier": 0.06807683070781767,
+          "oof_log_loss": 1.0724715526625808
+        }
+      },
+      "fit_seconds": 5.12
+    },
+    {
+      "test_year": 2019,
+      "val_lo": 815,
+      "test_lo": 971,
+      "test_hi": 1024,
+      "val_start_year": 2016,
+      "val_positives": 10,
+      "val_negatives": 146,
+      "train_start": "2000-05-23",
+      "train_end": "2015-12-29",
+      "val_start": "2016-01-05",
+      "val_end": "2018-12-25",
+      "test_start": "2019-01-01",
+      "test_end": "2019-12-31",
+      "n_train": 815,
+      "n_val": 156,
+      "n_test": 53,
+      "calibration_method": "isotonic",
+      "calibration_report": {
+        "sigmoid": {
+          "oof_brier": 0.054651354111413454,
+          "oof_log_loss": 0.17547212986843694
+        },
+        "isotonic": {
+          "oof_brier": 0.0523338571843157,
+          "oof_log_loss": 1.004075335233615
+        }
+      },
+      "fit_seconds": 4.96
+    },
+    {
+      "test_year": 2020,
+      "val_lo": 815,
+      "test_lo": 1024,
+      "test_hi": 1076,
+      "val_start_year": 2016,
+      "val_positives": 10,
+      "val_negatives": 199,
+      "train_start": "2000-05-23",
+      "train_end": "2015-12-29",
+      "val_start": "2016-01-05",
+      "val_end": "2019-12-31",
+      "test_start": "2020-01-07",
+      "test_end": "2020-12-29",
+      "n_train": 815,
+      "n_val": 209,
+      "n_test": 52,
+      "calibration_method": "isotonic",
+      "calibration_report": {
+        "sigmoid": {
+          "oof_brier": 0.04139880967854835,
+          "oof_log_loss": 0.13801375770061108
+        },
+        "isotonic": {
+          "oof_brier": 0.03944854826588844,
+          "oof_log_loss": 0.7623954485632349
+        }
+      },
+      "fit_seconds": 5.12
+    },
+    {
+      "test_year": 2021,
+      "val_lo": 971,
+      "test_lo": 1076,
+      "test_hi": 1092,
+      "val_start_year": 2019,
+      "val_positives": 23,
+      "val_negatives": 82,
+      "train_start": "2000-05-23",
+      "train_end": "2018-12-25",
+      "val_start": "2019-01-01",
+      "val_end": "2020-12-29",
+      "test_start": "2021-01-05",
+      "test_end": "2021-04-20",
+      "n_train": 971,
+      "n_val": 105,
+      "n_test": 16,
+      "calibration_method": "sigmoid",
+      "calibration_report": {
+        "sigmoid": {
+          "oof_brier": 0.13250214065260846,
+          "oof_log_loss": 0.417718343679678
+        },
+        "isotonic": {
+          "oof_brier": 0.14015816190908534,
+          "oof_log_loss": 1.0490266236333812
+        }
+      },
+      "fit_seconds": 5.18
+    }
+  ],
+  "timestamp_utc": "2026-10-10T05:15:48.003430+00:00",
+  "versions": {
+    "python": "3.13.16",
+    "numpy": "2.2.6",
+    "pandas": "2.3.1",
+    "scikit-learn": "1.6.1",
+    "shap": "0.50.0",
+    "joblib": "1.5.1"
+  }
+}
