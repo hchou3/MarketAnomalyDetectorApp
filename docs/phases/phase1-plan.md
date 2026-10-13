@@ -134,7 +134,7 @@ Tables:
 |---|---|---|
 | `instruments` | `id` PK, name, asset_class, units, quote, native_frequency, valid_from/to | Synced from the YAML |
 | `instrument_groups` | (`instrument_id`, `group`) | Many-to-many |
-| `symbol_map` | (`instrument_id`, `provider`) PK, symbol, priority, fidelity, publication_lag_days, revised | Synced from the YAML |
+| `symbol_map` | (`instrument_id`, `provider`) PK, symbol, priority, fidelity, **source_frequency**, publication_lag_days, revised | Synced from the YAML |
 | `prices` | (`instrument_id`, `provider`, `obs_date`) PK, value, `known_at`, `ingested_at`, `run_id` | Raw, native frequency. A `vintage` column is added only if open decision 11 picks ALFRED |
 | `labels` | (`label_set`, `week`) PK, value, source | `ews_v1` from the CSV |
 | `ingestion_runs` | id, started/finished, mode, status, counts | One row per CLI run |
@@ -144,6 +144,15 @@ Rules: `mad-data sync-registry` upserts instruments and symbol map from YAML (YA
 the source of truth); removing an instrument from YAML marks it inactive, never
 deletes its prices. Upserts are idempotent: re-running an ingest changes nothing
 unless the provider changed a value, and a changed value is logged.
+
+**`known_at` computation:** `known_at = obs_period_end(obs_date, source_frequency) +
+publication_lag_days`. For `source_frequency = monthly`, `obs_period_end` returns the
+last calendar day of the observation month, because FRED dates monthly values on the
+1st of the month (e.g. `2023-01-01` represents January 2023, which ends on the 31st).
+For daily and weekly sources `obs_period_end` is the identity. This means a monthly
+FRED series with `publication_lag_days = 40` and `obs_date = 2023-01-01` yields
+`known_at = 2023-01-31 + 40 days = 2023-03-12`. Never use the raw `obs_date` as the
+period start when computing `known_at` for monthly series.
 
 Tests run against real Postgres (Docker Compose locally, a service container in CI).
 No SQLite substitute, since upsert syntax and timestamp handling differ.
@@ -199,6 +208,12 @@ class Provider(Protocol):
   malformed, HTTP error) under `tests/fixtures/`. A `scripts/record_fixtures.py`
   refreshes them; the user runs it, since Claude can't reach the sites. Tests never
   hit the network unless marked `@pytest.mark.network`; a weekly CI job runs those.
+
+**Verify during Step 4:** FRED series DEXJPUS (`usd_jpy`) and DEXUSUK (`gbp_usd`)
+are described as "daily" but have historically been published only on business days
+with some gaps. Confirm whether they carry a 5-day or 7-day cadence in practice and
+whether the H.10 `publication_lag_days = 3` is the right floor, or if a higher value
+is needed when a holiday falls on the Monday after a Friday `obs_date`.
 
 **Done when:** provider tests pass offline, and the user has run the network tests
 once successfully.
