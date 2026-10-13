@@ -1,24 +1,25 @@
 from __future__ import annotations
 
 import logging
+
+import joblib
 import numpy as np
 import pandas as pd
-import joblib
-
-log = logging.getLogger(__name__)
 from sklearn.calibration import CalibratedClassifierCV
-from sklearn.frozen import FrozenEstimator
 from sklearn.ensemble import IsolationForest, RandomForestClassifier, StackingClassifier
+from sklearn.frozen import FrozenEstimator
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import classification_report, f1_score
 from sklearn.preprocessing import StandardScaler
 from sklearn.tree import DecisionTreeClassifier
 
-from .data import engineer_features, FEATURE_COLS
+from .data import FEATURE_COLS, engineer_features
 from .explain import SHAPExplainer
 
+log = logging.getLogger(__name__)
+
 # Augmented feature set: original engineered features + Isolation Forest score
-AUG_FEATURE_COLS = FEATURE_COLS + ['iso_score']
+AUG_FEATURE_COLS = FEATURE_COLS + ["iso_score"]
 
 
 class AnomalyPipeline:
@@ -33,17 +34,30 @@ class AnomalyPipeline:
         self.scaler = StandardScaler()
         self.iso_forest = IsolationForest(
             n_estimators=500,
-            contamination='auto',
+            contamination="auto",
             max_features=1.0,
             random_state=42,
         )
         self._stacking = StackingClassifier(
             estimators=[
-                ('dt', DecisionTreeClassifier(max_depth=10, class_weight='balanced', random_state=42)),
-                ('rf', RandomForestClassifier(n_estimators=200, class_weight='balanced', random_state=42, n_jobs=-1)),
-                ('lr', LogisticRegression(C=0.1, class_weight='balanced', solver='liblinear', max_iter=1000)),
+                (
+                    "dt",
+                    DecisionTreeClassifier(max_depth=10, class_weight="balanced", random_state=42),
+                ),
+                (
+                    "rf",
+                    RandomForestClassifier(
+                        n_estimators=200, class_weight="balanced", random_state=42, n_jobs=-1
+                    ),
+                ),
+                (
+                    "lr",
+                    LogisticRegression(
+                        C=0.1, class_weight="balanced", solver="liblinear", max_iter=1000
+                    ),
+                ),
             ],
-            final_estimator=LogisticRegression(C=1.0, solver='liblinear', max_iter=1000),
+            final_estimator=LogisticRegression(C=1.0, solver="liblinear", max_iter=1000),
             cv=5,
             passthrough=False,
             n_jobs=-1,
@@ -62,7 +76,7 @@ class AnomalyPipeline:
 
     def _augment(self, X_scaled: pd.DataFrame) -> pd.DataFrame:
         X_aug = X_scaled.copy()
-        X_aug['iso_score'] = self.iso_forest.decision_function(X_scaled[FEATURE_COLS])
+        X_aug["iso_score"] = self.iso_forest.decision_function(X_scaled[FEATURE_COLS])
         return X_aug
 
     # ------------------------------------------------------------------
@@ -88,7 +102,7 @@ class AnomalyPipeline:
         self._stacking.fit(X_tr_aug, y_train)
 
         # Calibrate on validation set so predict_proba is meaningful
-        self.calibrated = CalibratedClassifierCV(FrozenEstimator(self._stacking), method='sigmoid')
+        self.calibrated = CalibratedClassifierCV(FrozenEstimator(self._stacking), method="sigmoid")
         self.calibrated.fit(X_v_aug, y_val)
 
         # Build SHAP explainer once (expensive) — reused at inference time

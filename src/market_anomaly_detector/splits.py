@@ -12,7 +12,7 @@ def split_timeseries(
     Data must already be sorted by date and have a 'Data' column.
     Returns (train_df, val_df, test_df) including the Data and Y columns.
     """
-    df = df.sort_values('Data').reset_index(drop=True)
+    df = df.sort_values("Data").reset_index(drop=True)
 
     train_end = train_years * 52
     val_end = (train_years + val_years) * 52

@@ -1,4 +1,5 @@
 """Tests for the time-based train/val/test split — focusing on data leakage."""
+
 from market_anomaly_detector.splits import split_timeseries
 
 
