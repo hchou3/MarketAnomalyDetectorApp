@@ -72,3 +72,59 @@ def test_f1_beats_random_baseline(trained_pipeline):
     preds = pipeline.predict(test[FEATURE_COLS])
     f1 = f1_score(test['Y'], preds)
     assert f1 > 0.3, f"F1 {f1:.4f} is unexpectedly low — check pipeline."
+
+
+# ---- Calibration selection tests ----
+
+def test_calibration_method_is_valid(trained_pipeline):
+    """calibration_method_ must be one of the two supported methods after auto fit."""
+    pipeline, _, _ = trained_pipeline
+    assert pipeline.calibration_method_ in {"sigmoid", "isotonic"}
+
+
+def test_calibration_report_has_both_methods(trained_pipeline):
+    """calibration_report_ must contain finite oof_brier for both methods."""
+    import math
+    pipeline, _, _ = trained_pipeline
+    report = pipeline.calibration_report_
+    assert set(report.keys()) == {"sigmoid", "isotonic"}
+    for method, scores in report.items():
+        assert "oof_brier" in scores, f"Missing oof_brier for {method}"
+        assert math.isfinite(scores["oof_brier"]), f"oof_brier for {method} is not finite"
+
+
+def test_calibration_forced_isotonic():
+    """Forcing calibration='isotonic' sets calibration_method_='isotonic'."""
+    raw = load_data(str(DATA_PATH))
+    featured = engineer_features(raw)
+    train, val, _ = split_timeseries(featured)
+    pipeline = AnomalyPipeline(calibration="isotonic")
+    pipeline.fit(train[FEATURE_COLS], train['Y'], val[FEATURE_COLS], val['Y'])
+    assert pipeline.calibration_method_ == "isotonic"
+
+
+def test_calibration_invalid_raises():
+    """Passing an unknown calibration method raises ValueError in __init__."""
+    with pytest.raises(ValueError, match="platt"):
+        AnomalyPipeline(calibration="platt")
+
+
+# ---- Persistence round-trip test ----
+
+def test_save_load_round_trip(trained_pipeline, tmp_path):
+    """score() on the same input must be identical before and after save/load."""
+    pipeline, _, _ = trained_pipeline
+    raw = load_data(str(DATA_PATH))
+    input_window = raw.iloc[:50]
+
+    before = pipeline.score(input_window)
+
+    artifact = tmp_path / "pipeline.joblib"
+    pipeline.save(str(artifact))
+    loaded = AnomalyPipeline.load(str(artifact))
+
+    after = loaded.score(input_window)
+
+    assert before["anomaly"] == after["anomaly"]
+    assert before["confidence"] == after["confidence"]
+    assert before["top_features"] == after["top_features"]
