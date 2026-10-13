@@ -1,0 +1,51 @@
+{
+  "timestamp_utc": "2026-10-09T15:58:36.774716+00:00",
+  "versions": {
+    "python": "3.13.0",
+    "numpy": "2.2.6",
+    "pandas": "2.3.1",
+    "scikit-learn": "1.6.1",
+    "shap": "0.50.0",
+    "joblib": "1.5.1"
+  },
+  "splits": {
+    "train": {
+      "start": "2000-05-23",
+      "end": "2009-05-05"
+    },
+    "val": {
+      "start": "2009-05-12",
+      "end": "2011-05-03"
+    },
+    "test": {
+      "start": "2011-05-10",
+      "end": "2012-05-01"
+    }
+  },
+  "calibration": {
+    "chosen_method": "isotonic",
+    "report": {
+      "sigmoid": {
+        "oof_brier": 0.11445227663921943,
+        "oof_log_loss": 0.39782835953441886
+      },
+      "isotonic": {
+        "oof_brier": 0.09827885539160687,
+        "oof_log_loss": 0.6501425500592493
+      }
+    }
+  },
+  "metrics": {
+    "baseline_test_f1": 0.7777777777777778,
+    "ensemble_val": {
+      "f1": 0.6153846153846154,
+      "precision": 0.8,
+      "recall": 0.5
+    },
+    "ensemble_test": {
+      "f1": 0.7837837837837838,
+      "precision": 0.6744186046511628,
+      "recall": 0.9354838709677419
+    }
+  }
+}
