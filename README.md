@@ -1,0 +1,65 @@
+# Market Anomaly Detector
+
+Detects market-wide stress regimes ("anomalies") from a set of macro instruments,
+explains which features drove each detection, and shows how those instruments behaved
+during past anomaly episodes. See [`docs/architecture-plan.md`](docs/architecture-plan.md)
+for the product scope and the phased build plan (Phases 0–8).
+
+> **Informational only.** This project produces historical regime scores and
+> explanations. It does not provide investment advice, buy/sell/hold recommendations,
+> or any suggestion that a result is safe to trade on.
+
+## Current results
+
+A walk-forward backtest over 2008 to April 2021 (14 yearly folds, 695 unseen weeks)
+gives the ensemble a pooled F1 of 0.63 against 0.45 for the original Isolation Forest
+baseline and 0.36 for always flagging an anomaly. It misses 2008 entirely and raises
+22 false alarms in 2020. Details:
+[`docs/reports/2026-10-10-walk-forward-backtest.md`](docs/reports/2026-10-10-walk-forward-backtest.md).
+
+## Data
+
+The model trains on weekly macro data (2000–2021) identified by Bloomberg codes.
+The source and license of that CSV are unknown; read [`data/README.md`](data/README.md)
+before redistributing it.
+
+## Setup
+
+Requires Python 3.12 or 3.13 and [`uv`](https://docs.astral.sh/uv/).
+
+```bash
+# Install the exact versions the published metrics were measured with
+uv sync --frozen --extra dev
+
+# Or with pip, using the same pins
+pip install -r requirements-dev.txt
+pip install -e . --no-deps
+```
+
+Results depend on library versions (calibration choice and F1 change across
+scikit-learn releases), so use the locked versions when comparing metrics.
+
+## Usage
+
+```bash
+mad-train                      # single-split training; writes artifacts/pipeline.joblib + .meta.json
+mad-train --calibration sigmoid
+mad-backtest                   # walk-forward backtest; writes artifacts/backtest/
+
+pytest                         # tests
+ruff check . && ruff format --check .
+```
+
+`artifacts/` is git-ignored. Paths can be overridden with `MAD_DATA_PATH` and
+`MAD_ARTIFACT_DIR`.
+
+## Project layout
+
+```
+src/market_anomaly_detector/   library package (data, splits, pipeline, explain, train, backtest)
+tests/                         pytest suite
+data/raw/                      EWS weekly data and extra stress series
+scripts/                       one-off data scripts (fetch_stress_data.py, retired in Phase 1)
+docs/                          architecture plan, phase plans, reports, archived specs
+notebooks/prototype.ipynb      archived exploratory notebook
+```
