@@ -157,8 +157,25 @@ period start when computing `known_at` for monthly series.
 Tests run against real Postgres (Docker Compose locally, a service container in CI).
 No SQLite substitute, since upsert syntax and timestamp handling differ.
 
-**Done when:** `docker compose up db && alembic upgrade head` works on a clean
-machine, and repository tests pass in CI.
+**`upsert_prices` / `upsert_labels` semantics:** only update a row when `value` or
+`known_at` (`value` or `source` for labels) IS DISTINCT FROM the stored value.  A
+repeated identical load returns 0 and the original `ingested_at` is preserved.
+Batches are chunked at 5,000 rows to stay under PostgreSQL's 65,535-parameter limit.
+Row counts are read from `RETURNING id` (not `rowcount`, which returns −1 for
+`INSERT … ON CONFLICT` without `RETURNING`).
+
+**Running DB tests locally:**
+```bash
+docker compose up -d db
+# MAD_TEST_DATABASE_URL must point to mad_test, NOT to the production mad DB.
+export MAD_TEST_DATABASE_URL=postgresql+psycopg://mad:mad@localhost:5432/mad_test
+pytest -m db -v   # the fixture runs alembic upgrade head automatically
+```
+The fixture will fail if `MAD_TEST_DATABASE_URL == MAD_DATABASE_URL` to prevent
+running destructive tests against the production database.
+
+**Done when:** repository tests pass in CI (`test-db` job), including
+`test_migration_is_at_head` and `test_no_model_drift`.
 
 ---
 

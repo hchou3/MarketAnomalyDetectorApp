@@ -68,11 +68,6 @@ jobs:
       - name: Install dependencies from lock file
         run: uv sync --frozen --extra dev --python 3.13
 
-      - name: Apply migrations
-        env:
-          MAD_DATABASE_URL: postgresql+psycopg://mad:mad@localhost:5432/mad_test
-        run: uv run alembic upgrade head
-
       - name: Run DB tests
         env:
           MAD_TEST_DATABASE_URL: postgresql+psycopg://mad:mad@localhost:5432/mad_test

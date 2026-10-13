@@ -9,7 +9,7 @@ from __future__ import annotations
 from datetime import date, datetime, timezone
 from typing import Optional
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -23,6 +23,16 @@ from .models import (
     PriceRow,
     SymbolMapRow,
 )
+
+# Postgres hard limit is 65,535 bind parameters per statement.
+# Chunk sizes are chosen conservatively well below that limit.
+_PRICE_CHUNK = 5_000  # 7 params/row → max 9,362; use 5,000
+_LABEL_CHUNK = 5_000  # 4 params/row → max 16,383; use 5,000
+
+
+def _chunks(lst: list, size: int):
+    for i in range(0, len(lst), size):
+        yield lst[i : i + size]
 
 
 def sync_registry(session: Session, instruments: list[Instrument]) -> None:
@@ -99,53 +109,69 @@ def upsert_prices(
     rows: list[dict],
     ingested_at: Optional[datetime] = None,
 ) -> int:
-    """Batch-upsert price rows; returns the number of rows affected.
+    """Batch-upsert price rows; return the number of rows inserted or changed.
 
-    Each dict in *rows* must have keys: instrument_id, provider, obs_date,
-    value (Decimal or float), known_at (date), and optionally run_id.
+    A row is only updated when *value* or *known_at* IS DISTINCT FROM the stored
+    value (NULL-safe comparison), so a repeated identical load returns 0 and
+    the original *ingested_at* is preserved.
+
+    Large batches are split into chunks of at most _PRICE_CHUNK rows to stay
+    under Postgres's 65,535 bind-parameter limit.
+
+    Each dict must contain: instrument_id, provider, obs_date, value
+    (Decimal or float), known_at (date), and optionally run_id.
     """
     if not rows:
         return 0
     ts = ingested_at or datetime.now(timezone.utc)
-    payload = [{**r, "ingested_at": ts} for r in rows]
-
-    stmt = (
-        pg_insert(PriceRow)
-        .values(payload)
-        .on_conflict_do_update(
+    total = 0
+    for chunk in _chunks(rows, _PRICE_CHUNK):
+        payload = [{**r, "ingested_at": ts} for r in chunk]
+        ins = pg_insert(PriceRow.__table__).values(payload)
+        stmt = ins.on_conflict_do_update(
             index_elements=["instrument_id", "provider", "obs_date"],
             set_={
-                "value": pg_insert(PriceRow).excluded.value,
-                "known_at": pg_insert(PriceRow).excluded.known_at,
-                "ingested_at": pg_insert(PriceRow).excluded.ingested_at,
-                "run_id": pg_insert(PriceRow).excluded.run_id,
+                "value": ins.excluded.value,
+                "known_at": ins.excluded.known_at,
+                "ingested_at": ins.excluded.ingested_at,
+                "run_id": ins.excluded.run_id,
             },
-        )
-    )
-    result = session.execute(stmt)
-    return result.rowcount
+            where=or_(
+                PriceRow.__table__.c.value.is_distinct_from(ins.excluded.value),
+                PriceRow.__table__.c.known_at.is_distinct_from(ins.excluded.known_at),
+            ),
+        ).returning(PriceRow.__table__.c.id)
+        result = session.execute(stmt)
+        total += len(result.fetchall())
+    return total
 
 
 def upsert_labels(session: Session, rows: list[dict]) -> int:
-    """Batch-upsert label rows; returns the number of rows affected.
+    """Batch-upsert label rows; return the number of rows inserted or changed.
 
-    Each dict must have: label_set (str), week (date), value (int), source (str).
+    Only updates when *value* or *source* IS DISTINCT FROM the stored row.
+
+    Each dict must contain: label_set (str), week (date), value (int), source (str).
     """
     if not rows:
         return 0
-    stmt = (
-        pg_insert(LabelRow)
-        .values(rows)
-        .on_conflict_do_update(
+    total = 0
+    for chunk in _chunks(rows, _LABEL_CHUNK):
+        ins = pg_insert(LabelRow.__table__).values(chunk)
+        stmt = ins.on_conflict_do_update(
             index_elements=["label_set", "week"],
             set_={
-                "value": pg_insert(LabelRow).excluded.value,
-                "source": pg_insert(LabelRow).excluded.source,
+                "value": ins.excluded.value,
+                "source": ins.excluded.source,
             },
-        )
-    )
-    result = session.execute(stmt)
-    return result.rowcount
+            where=or_(
+                LabelRow.__table__.c.value.is_distinct_from(ins.excluded.value),
+                LabelRow.__table__.c.source.is_distinct_from(ins.excluded.source),
+            ),
+        ).returning(LabelRow.__table__.c.label_set)
+        result = session.execute(stmt)
+        total += len(result.fetchall())
+    return total
 
 
 def start_run(session: Session, mode: str) -> IngestionRunRow:
