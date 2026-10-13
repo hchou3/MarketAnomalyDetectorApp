@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Optional
 
 import yaml
-from pydantic import BaseModel, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
 from .paths import REPO_ROOT
 
@@ -55,10 +55,16 @@ class Fidelity(str, Enum):
 
 
 class SourceEntry(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     provider: str
     symbol: Optional[str] = None
     priority: int
     fidelity: Fidelity
+    # When the source's native frequency differs from the instrument's (e.g. a
+    # monthly FRED series for an otherwise-daily instrument), set this explicitly.
+    # None means "same as the instrument's native_frequency".
+    source_frequency: Optional[Frequency] = None
     publication_lag_days: int = 0
     revised: bool = False
     notes: str = ""
@@ -87,11 +93,23 @@ class SourceEntry(BaseModel):
             )
         return self
 
+    @model_validator(mode="after")
+    def monthly_source_needs_realistic_lag(self) -> SourceEntry:
+        if self.source_frequency == Frequency.monthly and self.publication_lag_days < 28:
+            raise ValueError(
+                f"A monthly source must have publication_lag_days >= 28 "
+                f"(got {self.publication_lag_days}). Monthly series typically "
+                f"lag 30–40 days after the observation month end."
+            )
+        return self
+
 
 # ── Instrument ─────────────────────────────────────────────────────────────────
 
 
 class Instrument(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     id: str
     name: str
     asset_class: AssetClass

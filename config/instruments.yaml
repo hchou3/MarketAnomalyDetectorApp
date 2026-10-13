@@ -133,7 +133,8 @@
       symbol: DEXJPUS
       priority: 1
       fidelity: exact
-      publication_lag_days: 1
+      publication_lag_days: 3
+      notes: H.10 release; 1 business day lag, rounded to 3 calendar days to cover weekends.
     - provider: yahoo
       symbol: "JPY=X"
       priority: 2
@@ -158,7 +159,8 @@
       symbol: DEXUSUK
       priority: 1
       fidelity: exact
-      publication_lag_days: 1
+      publication_lag_days: 3
+      notes: H.10 release; 1 business day lag, rounded to 3 calendar days to cover weekends.
     - provider: yahoo
       symbol: "GBPUSD=X"
       priority: 2
@@ -347,7 +349,9 @@
       symbol: IRLTLT01DEM156N
       priority: 1
       fidelity: proxy
-      notes: OECD monthly series; best available public source for the Bund.
+      source_frequency: monthly
+      publication_lag_days: 40
+      notes: OECD monthly series; published ~5-6 weeks after month end. Best available public source for the Bund.
     - provider: bloomberg_ews
       symbol: GTDEM10Y
       priority: 99
@@ -416,7 +420,9 @@
       symbol: IRLTLT01ITM156N
       priority: 1
       fidelity: proxy
-      notes: OECD monthly series only.
+      source_frequency: monthly
+      publication_lag_days: 40
+      notes: OECD monthly series; published ~5-6 weeks after month end.
     - provider: bloomberg_ews
       symbol: GTITL10YR
       priority: 99
@@ -471,7 +477,9 @@
       symbol: IRLTLT01JPM156N
       priority: 1
       fidelity: proxy
-      notes: OECD monthly series only.
+      source_frequency: monthly
+      publication_lag_days: 40
+      notes: OECD monthly series; published ~5-6 weeks after month end.
     - provider: bloomberg_ews
       symbol: GTJPY10YR
       priority: 99
