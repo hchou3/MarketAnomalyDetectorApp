@@ -126,19 +126,25 @@ These keep earlier phases compatible with the serving and live stacks:
 
 ---
 
-## 3. Current state (audit of `main`, 2026-10-13)
+## 3. Current state
 
-| Area | State | Action |
+### After Phase 0 (`phase-0/repo-hygiene`, 2026-10-13)
+
+Baseline (measured on `main` before Phase 0): pytest → 10 passed; `mad-train` → test F1
+0.8235, baseline F1 0.7778 (Python 3.13, pandas 3.0.5, scikit-learn 1.9.1).
+Phase 0 is structure and tooling only; metrics are unchanged after the branch lands.
+
+| Area | State after Phase 0 | Next action |
 |---|---|---|
-| `market_anomaly_detector/data.py` | Loads Bloomberg-coded CSV; features are raw price **levels** + MA crosses + `USD_Over_100` | Rewrite features to be stationary (Phase 2) |
-| `splits.py` | Hard-coded 12-year cut; drops all data after 2012-05 (incl. COVID) | Replace with walk-forward over full history |
-| `pipeline.py` | IsoForest score → StackingClassifier → sigmoid calibration (`FrozenEstimator`) on 104 val rows | Keep the structure; re-evaluate after features change; verify ONNX export |
-| `explain.py` | SHAP on the RF base learner only, not the calibrated output | Explain the final model output |
-| `train.py` | Test set = 52 rows, 60% positive; always-positive F1 ≈ 0.75 vs. reported 0.84 | Event-level metrics, trivial-baseline comparison |
-| `api/api.py` | Flask stub; `upload_csv(request)` signature is broken | Replace with FastAPI app |
-| `prompts/correlations_analysis.j2` | f-string placeholder inside Jinja; asks LLM to rank tickers | Delete; replaced by the narrator |
-| Repo hygiene | `__pycache__/` and `artifacts/pipeline.joblib` committed; `.gitignore` nearly empty | Untrack and ignore |
-| Data | Bloomberg codes; ~1/3 of columns have no Yahoo/FRED source; labels end 2021-04; source and license of the CSV unknown | Symbol map + label strategy (Phases 1–2); confirm CSV source |
+| `src/market_anomaly_detector/data.py` | Loads CSV; features are raw price **levels** + MA crosses + `USD_Over_100` | Rewrite features to be stationary (Phase 2) |
+| `src/market_anomaly_detector/splits.py` | Hard-coded 12-year cut; drops all data after 2012-05 (incl. COVID) | Replace with walk-forward over full history (Phase 2) |
+| `src/market_anomaly_detector/pipeline.py` | IsoForest score → StackingClassifier → sigmoid calibration (`FrozenEstimator`) on 104 val rows | Re-evaluate after features change; verify ONNX export (Phase 3) |
+| `src/market_anomaly_detector/explain.py` | SHAP on the RF base learner only, not the calibrated output | Explain the final model output (Phase 3) |
+| `src/market_anomaly_detector/train.py` | Test set = 52 rows, 60% positive; F1 0.8235 (ensemble) vs. 0.7778 (baseline) | Event-level metrics, trivial-baseline comparison (Phase 2) |
+| `api/` | Deleted (Flask stub was broken) | Replace with FastAPI app (Phase 4) |
+| `prompts/` | Deleted (out of scope) | Narrator lives in Phase 7 |
+| Repo hygiene | Complete: src/ layout, pyproject.toml, uv.lock, ruff, CI, docs tracked | — |
+| Data | `data/raw/ews_weekly_2000_2021.csv`; labels end 2021-04; source/license unknown | Confirm source before making repo public (open decision 2) |
 
 ---
 
@@ -490,6 +496,7 @@ at the live frequency.
 | 2026-10-13 | Project requirement: Triton behind a gRPC scoring service, Redis cache, Kubernetes deployment. These don't depend on live data, so they move to Phase 5, right after the API. Kafka, Flink/PySpark, Feast, and FAISS remain in the live phase (Phase 8). |
 | 2026-10-13 | Redis caches frequently queried instruments and results (regime score, per-instrument episode stats), not per-ticker scores, because the model is market-level. |
 | 2026-10-13 | SHAP explanations run in the scoring service using the sklearn artifact; Triton serves the ONNX model for predictions. |
+| 2026-10-13 | Phase 0 layout: `src/` package layout, `pyproject.toml` + `uv.lock`, top-level `tests/`, docs tracked under `docs/`, dead code deleted (`api/`, `prompts/`). No history rewrite of the 12.9 MB `pipeline.joblib` (D4 in phase0-plan). |
 
 ---
 
