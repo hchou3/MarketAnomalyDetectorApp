@@ -13,6 +13,8 @@ dependencies = [
     "scikit-learn>=1.6",
     "shap",
     "joblib",
+    "pydantic>=2",
+    "pyyaml",
 ]
 
 [project.optional-dependencies]
@@ -52,6 +54,8 @@ select = ["E", "F", "I"]
 "src/market_anomaly_detector/backtest.py" = ["E501"]
 # Retired in Phase 1 (replaced by the data providers).
 "scripts/fetch_stress_data.py" = ["E501"]
+# Inline fixture dicts are clearer when kept on one line even if slightly long.
+"tests/test_registry.py" = ["E501"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
