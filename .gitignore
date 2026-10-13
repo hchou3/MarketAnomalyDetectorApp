@@ -1,5 +1,41 @@
-/Claude Instructions/
+# Python
 __pycache__/
-*.pyc
+*.py[cod]
+*.pyo
+
+# Pytest
 .pytest_cache/
+.ruff_cache/
+
+# Virtual environments
 .venv/
+venv/
+
+# Package build
+*.egg-info/
+build/
+dist/
+
+# Environment files
+.env
+.env.*
+
+# ML artifacts
+artifacts/
+*.joblib
+*.onnx
+model_repository/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+
+# gRPC generated stubs
+*_pb2.py
+*_pb2_grpc.py
