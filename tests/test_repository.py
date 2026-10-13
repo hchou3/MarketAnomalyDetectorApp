@@ -1,12 +1,13 @@
 """Tests for db.known_at (pure) and db.repository (requires Postgres)."""
 
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
 import pytest
 
 from market_anomaly_detector.db.known_at import compute_known_at, obs_period_end
 from market_anomaly_detector.db.models import (
+    Base,
     IngestionRunRow,
     InstrumentRow,
     LabelRow,
@@ -85,19 +86,7 @@ def test_compute_known_at_weekly():
     assert compute_known_at(date(2023, 3, 10), "weekly", 11) == date(2023, 3, 21)
 
 
-# ── Repository (require Postgres) ────────────────────────────────────────────
-
-pytestmark_db = pytest.mark.db
-
-# Two minimal instruments used across all DB tests.
-_INST_A = {
-    "id": "test_gold",
-    "instrument_id": "test_gold",
-}
-_INST_B = {
-    "id": "test_vix",
-    "instrument_id": "test_vix",
-}
+# ── Helpers for DB tests ──────────────────────────────────────────────────────
 
 
 def _make_instrument_row(instrument_id: str) -> dict:
@@ -121,6 +110,9 @@ def _insert_instrument(session, instrument_id: str) -> InstrumentRow:
     return row
 
 
+# ── Registry sync ─────────────────────────────────────────────────────────────
+
+
 @pytest.mark.db
 def test_sync_registry_inserts_instruments(db_session):
     instruments = load_registry()
@@ -129,7 +121,7 @@ def test_sync_registry_inserts_instruments(db_session):
 
     result = db_session.get(InstrumentRow, "gold")
     assert result is not None
-    assert result.name == "Gold"
+    assert result.name == "Gold spot (Bloomberg BGN)"
     assert result.active is True
 
 
@@ -176,7 +168,6 @@ def test_sync_registry_deactivates_removed_instrument(db_session):
     sync_registry(db_session, instruments)
     db_session.flush()
 
-    # Re-sync with one instrument removed.
     subset = [i for i in instruments if i.id != "gold"]
     sync_registry(db_session, subset)
     db_session.flush()
@@ -184,6 +175,9 @@ def test_sync_registry_deactivates_removed_instrument(db_session):
     gold = db_session.get(InstrumentRow, "gold")
     assert gold is not None, "Row should be kept (not deleted)"
     assert gold.active is False
+
+
+# ── upsert_prices ─────────────────────────────────────────────────────────────
 
 
 @pytest.mark.db
@@ -225,13 +219,17 @@ def test_upsert_prices_updates_existing(db_session):
         known_at=date(2023, 2, 2),
         run_id=None,
     )
-    upsert_prices(db_session, [{**base, "value": Decimal("100.0")}])
+    n1 = upsert_prices(db_session, [{**base, "value": Decimal("100.0")}])
     db_session.flush()
-    upsert_prices(db_session, [{**base, "value": Decimal("200.0")}])
+    assert n1 == 1
+
+    n2 = upsert_prices(db_session, [{**base, "value": Decimal("200.0")}])
     db_session.flush()
+    assert n2 == 1  # value changed → row returned by RETURNING
 
     from sqlalchemy import select
 
+    db_session.expire_all()
     price = db_session.execute(
         select(PriceRow).where(
             PriceRow.instrument_id == "update_test",
@@ -240,6 +238,87 @@ def test_upsert_prices_updates_existing(db_session):
         )
     ).scalar_one()
     assert price.value == Decimal("200.0")
+
+
+@pytest.mark.db
+def test_upsert_prices_repeated_load_returns_zero(db_session):
+    """Upserting identical rows a second time must return 0 (no changes made)."""
+    _insert_instrument(db_session, "repeat_test")
+    row = dict(
+        instrument_id="repeat_test",
+        provider="fred",
+        obs_date=date(2023, 3, 1),
+        value=Decimal("100.0"),
+        known_at=date(2023, 3, 2),
+        run_id=None,
+    )
+    n1 = upsert_prices(db_session, [row])
+    db_session.flush()
+    assert n1 == 1
+
+    n2 = upsert_prices(db_session, [row])
+    db_session.flush()
+    assert n2 == 0
+
+
+@pytest.mark.db
+def test_upsert_prices_preserves_ingested_at_on_repeat(db_session):
+    """When value and known_at are unchanged, ingested_at must not be overwritten."""
+    _insert_instrument(db_session, "ingested_at_test")
+
+    first_ts = datetime(2023, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+    row = dict(
+        instrument_id="ingested_at_test",
+        provider="fred",
+        obs_date=date(2023, 3, 1),
+        value=Decimal("100.0"),
+        known_at=date(2023, 3, 2),
+        run_id=None,
+    )
+    upsert_prices(db_session, [row], ingested_at=first_ts)
+    db_session.flush()
+
+    second_ts = datetime(2023, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
+    upsert_prices(db_session, [row], ingested_at=second_ts)
+    db_session.flush()
+
+    from sqlalchemy import select
+
+    db_session.expire_all()
+    price = db_session.execute(
+        select(PriceRow).where(
+            PriceRow.instrument_id == "ingested_at_test",
+            PriceRow.obs_date == date(2023, 3, 1),
+        )
+    ).scalar_one()
+    assert price.ingested_at == first_ts
+
+
+@pytest.mark.db
+def test_upsert_prices_large_batch(db_session):
+    """16,000 rows must be chunked and all inserted without hitting the PG param limit."""
+    _insert_instrument(db_session, "large_batch_test")
+    db_session.flush()
+
+    start = date(2000, 1, 3)
+    n_rows = 16_000
+    rows = [
+        dict(
+            instrument_id="large_batch_test",
+            provider="fred",
+            obs_date=start + timedelta(days=i),
+            value=Decimal(str(i)),
+            known_at=start + timedelta(days=i + 1),
+            run_id=None,
+        )
+        for i in range(n_rows)
+    ]
+    n = upsert_prices(db_session, rows)
+    db_session.flush()
+    assert n == n_rows
+
+
+# ── upsert_labels ─────────────────────────────────────────────────────────────
 
 
 @pytest.mark.db
@@ -261,6 +340,17 @@ def test_upsert_labels(db_session):
         )
     ).scalar_one()
     assert label.value == 1
+
+
+@pytest.mark.db
+def test_upsert_labels_repeated_load_returns_zero(db_session):
+    rows = [dict(label_set="ews_repeat_test", week=date(2010, 2, 2), value=1, source="test")]
+    assert upsert_labels(db_session, rows) == 1
+    db_session.flush()
+    assert upsert_labels(db_session, rows) == 0
+
+
+# ── Run lifecycle ─────────────────────────────────────────────────────────────
 
 
 @pytest.mark.db
@@ -292,6 +382,9 @@ def test_run_lifecycle(db_session):
     assert refreshed.instruments_ok == 1
 
 
+# ── get_last_price_date ───────────────────────────────────────────────────────
+
+
 @pytest.mark.db
 def test_get_last_price_date_empty(db_session):
     _insert_instrument(db_session, "noprices_test")
@@ -318,3 +411,43 @@ def test_get_last_price_date_returns_latest(db_session):
 
     latest = get_last_price_date(db_session, "dates_test", "yahoo")
     assert latest == date(2023, 1, 10)
+
+
+# ── Migration checks ──────────────────────────────────────────────────────────
+
+
+@pytest.mark.db
+def test_migration_is_at_head(db_engine):
+    """After alembic upgrade head the DB must be at the expected revision."""
+    from alembic.runtime.migration import MigrationContext
+
+    with db_engine.connect() as conn:
+        ctx = MigrationContext.configure(conn)
+        heads = ctx.get_current_heads()
+
+    assert "a1b2c3d4e5f6" in heads, f"Expected revision a1b2c3d4e5f6 in heads, got {heads!r}"
+
+
+@pytest.mark.db
+def test_no_model_drift(db_engine):
+    """All tables and columns defined in models.py must be present in the DB.
+
+    Extra indexes or constraints added by the migration (not in models) are
+    intentional and are not flagged.
+    """
+    from alembic.autogenerate import compare_metadata
+    from alembic.runtime.migration import MigrationContext
+
+    with db_engine.connect() as conn:
+        ctx = MigrationContext.configure(conn)
+        diff = compare_metadata(ctx, Base.metadata)
+
+    # Only care about things the models expect but the DB is missing.
+    # "remove_*" means the DB has something extra (e.g. a performance index)
+    # which is not drift — the migration intentionally adds things the ORM
+    # class doesn't model.
+    missing_from_db = [op for op in diff if not str(op[0]).startswith("remove_")]
+    assert not missing_from_db, (
+        "Model/migration drift — run 'alembic revision --autogenerate' to create a "
+        f"new migration. Missing from DB: {missing_from_db}"
+    )
