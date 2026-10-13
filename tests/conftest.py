@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from alembic import command as alembic_command
 from market_anomaly_detector.data import FEATURE_COLS, engineer_features, load_data
+from market_anomaly_detector.db.engine import get_database_url
 from market_anomaly_detector.db.models import Base
 from market_anomaly_detector.paths import DATA_PATH, REPO_ROOT
 from market_anomaly_detector.pipeline import AnomalyPipeline
@@ -31,8 +32,8 @@ def db_engine():
     if not url:
         pytest.skip("MAD_TEST_DATABASE_URL not set; skipping @pytest.mark.db tests")
 
-    prod_url = os.environ.get("MAD_DATABASE_URL")
-    if prod_url and url.rstrip("/") == prod_url.rstrip("/"):
+    prod_url = get_database_url()
+    if url.rstrip("/") == prod_url.rstrip("/"):
         pytest.fail(
             "MAD_TEST_DATABASE_URL equals MAD_DATABASE_URL — refusing to run "
             "destructive DB tests against the production database. "
@@ -43,7 +44,7 @@ def db_engine():
 
     # Build the schema via alembic so the fixture exercises the migration itself.
     alembic_cfg = AlembicConfig(str(REPO_ROOT / "alembic.ini"))
-    alembic_cfg.set_main_option("sqlalchemy.url", url)
+    alembic_cfg.attributes["database_url"] = url
     alembic_command.upgrade(alembic_cfg, "head")
 
     yield engine
