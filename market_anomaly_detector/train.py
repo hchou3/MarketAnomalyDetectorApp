@@ -2,7 +2,7 @@
 Train the two-stage anomaly pipeline and save all artifacts.
 
 Usage:
-    python -m market_anomaly_detector.train --data "data/FinancialMarketData.xlsx - EWS.csv"
+    python -m market_anomaly_detector.train --data "data/raw/ews_weekly_2000_2021.csv"
     python -m market_anomaly_detector.train
 """
 import argparse
@@ -17,7 +17,7 @@ from .data import engineer_features, load_data, FEATURE_COLS
 from .pipeline import AnomalyPipeline
 from .splits import split_timeseries
 
-DEFAULT_DATA = Path(__file__).parent.parent / "data" / "FinancialMarketData.xlsx - EWS.csv"
+DEFAULT_DATA = Path(__file__).parent.parent / "data" / "raw" / "ews_weekly_2000_2021.csv"
 DEFAULT_ARTIFACT = Path(__file__).parent.parent / "artifacts" / "pipeline.joblib"
 
 
