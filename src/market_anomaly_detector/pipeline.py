@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import logging
 import numpy as np
 import pandas as pd
 import joblib
+
+log = logging.getLogger(__name__)
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.frozen import FrozenEstimator
 from sklearn.ensemble import IsolationForest, RandomForestClassifier, StackingClassifier
@@ -146,8 +149,7 @@ class AnomalyPipeline:
     def evaluate(self, X: pd.DataFrame, y: pd.Series, label: str = "set") -> dict:
         preds = self.predict(X)
         probas = self.predict_proba(X)[:, 1]
-        print(f"\n--- {label} ---")
-        print(classification_report(y, preds, digits=4))
+        log.info("\n--- %s ---\n%s", label, classification_report(y, preds, digits=4))
         return {
             "f1": f1_score(y, preds),
             "predictions": preds,
@@ -160,7 +162,7 @@ class AnomalyPipeline:
 
     def save(self, path: str) -> None:
         joblib.dump(self, path)
-        print(f"Pipeline saved to {path}")
+        log.info("Pipeline saved to %s", path)
 
     @classmethod
     def load(cls, path: str) -> AnomalyPipeline:
