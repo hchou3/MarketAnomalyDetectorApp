@@ -1,7 +1,8 @@
 """Shared test fixtures — session-scoped so the pipeline trains once per run."""
+
 import pytest
 
-from market_anomaly_detector.data import engineer_features, load_data, FEATURE_COLS
+from market_anomaly_detector.data import FEATURE_COLS, engineer_features, load_data
 from market_anomaly_detector.paths import DATA_PATH
 from market_anomaly_detector.pipeline import AnomalyPipeline
 from market_anomaly_detector.splits import split_timeseries

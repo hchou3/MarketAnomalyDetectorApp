@@ -1,9 +1,10 @@
 """Smoke tests for AnomalyPipeline — fit, predict, score interface."""
+
 import numpy as np
 import pytest
 from sklearn.metrics import f1_score
 
-from market_anomaly_detector.data import load_data, FEATURE_COLS
+from market_anomaly_detector.data import FEATURE_COLS, load_data
 from market_anomaly_detector.paths import DATA_PATH
 
 

@@ -13,7 +13,7 @@ class SHAPExplainer:
     """
 
     def __init__(self, stacking_clf, X_background: pd.DataFrame, feature_names: list[str]):
-        rf = stacking_clf.named_estimators_['rf']
+        rf = stacking_clf.named_estimators_["rf"]
         self.explainer = shap.TreeExplainer(rf, data=shap.sample(X_background, 100))
         self.feature_names = list(feature_names)
 
