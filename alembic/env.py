@@ -7,8 +7,14 @@ from market_anomaly_detector.db.models import Base
 
 config = context.config
 
-# Override the URL from the environment so alembic commands pick up the right DB.
-url = os.environ.get("MAD_DATABASE_URL", "postgresql+psycopg://mad:mad@localhost:5432/mad")
+# Priority: programmatic caller (config.attributes) > env var > default.
+# Tests set config.attributes["database_url"] so they can target mad_test without
+# having MAD_DATABASE_URL in the environment override them.
+url = (
+    config.attributes.get("database_url")
+    or os.environ.get("MAD_DATABASE_URL")
+    or "postgresql+psycopg://mad:mad@localhost:5432/mad"
+)
 config.set_main_option("sqlalchemy.url", url)
 
 target_metadata = Base.metadata
