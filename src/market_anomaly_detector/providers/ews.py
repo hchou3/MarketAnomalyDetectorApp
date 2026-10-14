@@ -115,25 +115,33 @@ def load_ews(
     failed = 0
 
     for ews_symbol, instrument_id in sorted(sym_map.items()):
+        n = 0
+        first_date = last_date = None
+        error_msg = None
         try:
-            hist = provider.get_history(ews_symbol)
-            if hist.empty:
-                add_run_item(session, run, instrument_id, "bloomberg_ews", "ok")
-                ok += 1
-                continue
+            with session.begin_nested():  # SAVEPOINT — rolls back only this series on error
+                hist = provider.get_history(ews_symbol)
+                if not hist.empty:
+                    rows = [
+                        {
+                            "instrument_id": instrument_id,
+                            "provider": "bloomberg_ews",
+                            "obs_date": row.obs_date,
+                            "value": row.value,
+                            "known_at": row.obs_date,
+                            "run_id": run.id,
+                        }
+                        for row in hist.itertuples(index=False)
+                    ]
+                    n = upsert_prices(session, rows)
+                    first_date = rows[0]["obs_date"]
+                    last_date = rows[-1]["obs_date"]
+        except Exception as exc:
+            error_msg = str(exc)[:500]
 
-            rows = [
-                {
-                    "instrument_id": instrument_id,
-                    "provider": "bloomberg_ews",
-                    "obs_date": row.obs_date,
-                    "value": row.value,
-                    "known_at": row.obs_date,
-                    "run_id": run.id,
-                }
-                for row in hist.itertuples(index=False)
-            ]
-            n = upsert_prices(session, rows)
+        # Record the outcome outside the savepoint so it is always persisted
+        # even when the series write failed.
+        if error_msg is None:
             add_run_item(
                 session,
                 run,
@@ -141,13 +149,13 @@ def load_ews(
                 "bloomberg_ews",
                 "ok",
                 rows_written=n,
-                first_date=rows[0]["obs_date"],
-                last_date=rows[-1]["obs_date"],
+                first_date=first_date,
+                last_date=last_date,
             )
             total_prices += n
             ok += 1
-        except Exception as exc:
-            add_run_item(session, run, instrument_id, "bloomberg_ews", "error", error=str(exc))
+        else:
+            add_run_item(session, run, instrument_id, "bloomberg_ews", "error", error=error_msg)
             failed += 1
 
     # Load Y column into labels as ews_v1
@@ -180,3 +188,48 @@ def load_ews(
         "instruments_ok": ok,
         "instruments_failed": failed,
     }
+
+
+def rebuild_ews_frame(
+    session: Session,
+    instruments: Optional[list] = None,
+) -> pd.DataFrame:
+    """Rebuild a DataFrame matching load_data() from bloomberg_ews prices and ews_v1 labels.
+
+    Returns columns: Data (datetime64[ns]), Y (int), and the 42 EWS series (float64),
+    sorted by date — identical to load_data(DATA_PATH) when populated via load_ews().
+    """
+    from sqlalchemy import select
+
+    from ..db.models import LabelRow, PriceRow
+    from ..registry import ews_symbol_map, load_registry
+
+    if instruments is None:
+        instruments = load_registry()
+
+    sym_map = ews_symbol_map(instruments)
+    id_to_sym = {v: k for k, v in sym_map.items()}
+
+    price_rows = session.execute(
+        select(PriceRow.obs_date, PriceRow.instrument_id, PriceRow.value).where(
+            PriceRow.provider == "bloomberg_ews"
+        )
+    ).all()
+    price_df = pd.DataFrame(
+        [(r.obs_date, id_to_sym[r.instrument_id], float(r.value)) for r in price_rows],
+        columns=["obs_date", "symbol", "value"],
+    )
+    wide = price_df.pivot(index="obs_date", columns="symbol", values="value")
+    wide.columns.name = None
+
+    label_rows = session.execute(
+        select(LabelRow.week, LabelRow.value).where(LabelRow.label_set == "ews_v1")
+    ).all()
+    labels = pd.Series({r.week: r.value for r in label_rows}, name="Y")
+
+    df = wide.join(labels)
+    df.index.name = "Data"
+    df = df.reset_index()
+    df["Data"] = pd.to_datetime(df["Data"])
+    df["Y"] = df["Y"].astype(int)
+    return df.sort_values("Data").reset_index(drop=True)
