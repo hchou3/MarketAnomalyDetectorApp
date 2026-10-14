@@ -30,6 +30,7 @@ dev = [
 [project.scripts]
 mad-train = "market_anomaly_detector.train:main"
 mad-backtest = "market_anomaly_detector.backtest:main"
+mad-data = "market_anomaly_detector.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
