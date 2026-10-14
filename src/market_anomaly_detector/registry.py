@@ -67,6 +67,9 @@ class SourceEntry(BaseModel):
     source_frequency: Optional[Frequency] = None
     publication_lag_days: int = 0
     revised: bool = False
+    # Yahoo-specific: True folds splits and dividends into Close (total-return).
+    # Set True for ETF proxies; leave False for indices, futures, and FX pairs.
+    auto_adjust: bool = False
     notes: str = ""
 
     @field_validator("provider")
