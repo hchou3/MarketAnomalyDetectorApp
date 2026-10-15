@@ -475,7 +475,8 @@ def test_migration_b2c3_downgrade_upgrade(db_engine):
     from alembic import command as _alembic_command
     from market_anomaly_detector.paths import REPO_ROOT
 
-    url = str(db_engine.url)
+    # str(url) masks the password as "***"; render it explicitly for Alembic.
+    url = db_engine.url.render_as_string(hide_password=False)
     alembic_cfg = _AlembicConfig(str(REPO_ROOT / "alembic.ini"))
     alembic_cfg.attributes["database_url"] = url
 
