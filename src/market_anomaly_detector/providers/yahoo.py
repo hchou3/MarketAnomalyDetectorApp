@@ -27,7 +27,7 @@ def _yfinance_fetch(
 ) -> pd.DataFrame:
     import yfinance as yf
 
-    kwargs: dict = {"auto_adjust": auto_adjust, "progress": False}
+    kwargs: dict = {"auto_adjust": auto_adjust}
     if start is not None:
         kwargs["start"] = start.isoformat()
         if end is not None:
