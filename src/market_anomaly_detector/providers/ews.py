@@ -115,7 +115,7 @@ def load_ews(
     failed = 0
 
     for ews_symbol, instrument_id in sorted(sym_map.items()):
-        n = 0
+        n = n_new = n_revised = 0
         first_date = last_date = None
         error_msg = None
         try:
@@ -133,7 +133,8 @@ def load_ews(
                         }
                         for row in hist.itertuples(index=False)
                     ]
-                    n = upsert_prices(session, rows)
+                    n_new, n_revised = upsert_prices(session, rows)
+                    n = n_new + n_revised
                     first_date = rows[0]["obs_date"]
                     last_date = rows[-1]["obs_date"]
         except Exception as exc:
@@ -148,7 +149,8 @@ def load_ews(
                 instrument_id,
                 "bloomberg_ews",
                 "ok",
-                rows_written=n,
+                rows_new=n_new,
+                rows_revised=n_revised,
                 first_date=first_date,
                 last_date=last_date,
             )

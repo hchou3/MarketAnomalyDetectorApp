@@ -14,7 +14,7 @@ from typing import Any, Optional
 import pandas as pd
 import pytest
 
-from market_anomaly_detector.ingestion import run_backfill
+from market_anomaly_detector.ingestion import is_stale, run_backfill
 from market_anomaly_detector.registry import (
     AssetClass,
     Fidelity,
@@ -50,11 +50,12 @@ def _inst(
     id_: str,
     sources: list[SourceEntry],
     native_freq: str = "daily",
+    asset_class: AssetClass = AssetClass.volatility,
 ) -> Instrument:
     return Instrument(
         id=id_,
         name=f"Test {id_}",
-        asset_class=AssetClass.volatility,
+        asset_class=asset_class,
         groups=["test"],
         units=Units.index_points,
         quote="points",
@@ -102,10 +103,10 @@ class CapturingSink:
     rows: list[dict] = field(default_factory=list)
     write_calls: int = 0
 
-    def write(self, rows: list[dict]) -> int:
+    def write(self, rows: list[dict]) -> tuple[int, int]:
         self.write_calls += 1
         self.rows.extend(rows)
-        return len(rows)
+        return (len(rows), 0)
 
 
 @dataclass
@@ -115,7 +116,7 @@ class MemorySink:
     _seen: set = field(default_factory=set)
     rows: list[dict] = field(default_factory=list)
 
-    def write(self, rows: list[dict]) -> int:
+    def write(self, rows: list[dict]) -> tuple[int, int]:
         new = 0
         for row in rows:
             key = (row["instrument_id"], row["provider"], row["obs_date"])
@@ -123,7 +124,7 @@ class MemorySink:
                 self._seen.add(key)
                 self.rows.append(row)
                 new += 1
-        return new
+        return (new, 0)
 
 
 # ── Shared fixture data ───────────────────────────────────────────────────────
@@ -149,7 +150,9 @@ def test_backfill_ok_result_fields():
     assert r.status == "ok"
     assert r.provider == "fred"
     assert r.instrument_id == "gold"
-    assert r.rows_written == 3
+    assert r.rows_written == 3  # property: rows_new + rows_revised
+    assert r.rows_new == 3
+    assert r.rows_revised == 0
     assert r.first_date == date(2024, 1, 2)
     assert r.last_date == date(2024, 1, 4)
     assert r.error is None
@@ -314,6 +317,54 @@ def test_backfill_since_forwarded_to_provider():
     assert calls[0]["start"] == since
 
 
+def test_backfill_get_start_overrides_since():
+    """When get_start is provided, it takes precedence over since."""
+    calls: list[dict] = []
+
+    class TrackingProvider:
+        name = "fred"
+
+        def get_history(self, symbol: str, start=None, end=None) -> pd.DataFrame:
+            calls.append({"symbol": symbol, "start": start})
+            return _df(_THREE_ROWS)
+
+    inst = _inst("gold", [_src("fred", "DGS10", 1)])
+    override_date = date(2024, 6, 1)
+
+    run_backfill(
+        [inst],
+        providers={"fred": TrackingProvider()},
+        sink=CapturingSink(),
+        since=date(2024, 1, 1),
+        get_start=lambda inst_id, provider: override_date,
+    )
+
+    assert calls[0]["start"] == override_date
+
+
+def test_backfill_get_start_none_means_full_history():
+    """get_start returning None triggers a full history fetch (start=None)."""
+    calls: list[dict] = []
+
+    class TrackingProvider:
+        name = "fred"
+
+        def get_history(self, symbol: str, start=None, end=None) -> pd.DataFrame:
+            calls.append({"symbol": symbol, "start": start})
+            return _df(_THREE_ROWS)
+
+    inst = _inst("gold", [_src("fred", "DGS10", 1)])
+
+    run_backfill(
+        [inst],
+        providers={"fred": TrackingProvider()},
+        sink=CapturingSink(),
+        get_start=lambda inst_id, provider: None,
+    )
+
+    assert calls[0]["start"] is None
+
+
 def test_backfill_run_id_stored_in_rows():
     """Every price row must carry the run_id passed to run_backfill."""
     inst = _inst("gold", [_src("fred", "DGS10", 1)])
@@ -370,6 +421,55 @@ def test_backfill_missing_provider_in_map():
     r = results[0]
     assert r.status == "error"
     assert r.rows_written == 0
+
+
+# ── is_stale ──────────────────────────────────────────────────────────────────
+
+
+def test_staleness_daily_not_stale():
+    """Daily: 4 business days = not stale."""
+    today = date(2024, 1, 10)  # Wednesday
+    last = date(2024, 1, 4)  # Thu 4, Fri 5, Mon 8, Tue 9 = 4 bdays to Jan 10
+    assert not is_stale(last, "daily", today)
+
+
+def test_staleness_daily_stale_at_boundary():
+    """Daily: 5 business days = stale."""
+    today = date(2024, 1, 10)  # Wednesday
+    last = date(2024, 1, 3)  # Wed → Thu 4, Fri 5, Mon 8, Tue 9, Wed 10 = 5 bdays
+    assert is_stale(last, "daily", today)
+
+
+def test_staleness_weekly_not_stale():
+    """Weekly: 9 calendar days = not stale."""
+    today = date(2024, 1, 20)
+    last = date(2024, 1, 11)  # 9 days
+    assert not is_stale(last, "weekly", today)
+
+
+def test_staleness_weekly_stale_at_boundary():
+    """Weekly: 10 calendar days = stale."""
+    today = date(2024, 1, 20)
+    last = date(2024, 1, 10)  # 10 days
+    assert is_stale(last, "weekly", today)
+
+
+def test_staleness_monthly_not_stale():
+    """Monthly: 44 calendar days = not stale."""
+    today = date(2024, 3, 15)
+    last = date(2024, 1, 31)  # Feb(29) + 15 Mar = 44 days
+    assert not is_stale(last, "monthly", today)
+
+
+def test_staleness_monthly_stale_at_boundary():
+    """Monthly: 45 calendar days = stale."""
+    today = date(2024, 3, 15)
+    last = date(2024, 1, 30)  # 1 Jan + 29 Feb + 15 Mar = 45 days
+    assert is_stale(last, "monthly", today)
+
+
+def test_staleness_no_data_always_stale():
+    assert is_stale(None, "daily", date(2024, 1, 10))
 
 
 # ── DB tests (require Postgres) ───────────────────────────────────────────────
@@ -456,7 +556,8 @@ def test_backfill_db_savepoint_isolates_write_failure(db_session):
                 r.instrument_id,
                 r.provider,
                 "ok",
-                rows_written=r.rows_written,
+                rows_new=r.rows_new,
+                rows_revised=r.rows_revised,
                 first_date=r.first_date,
                 last_date=r.last_date,
             )
@@ -479,6 +580,8 @@ def test_backfill_db_savepoint_isolates_write_failure(db_session):
     assert r_over.rows_written == 0
     assert r_norm.status == "ok"
     assert r_norm.rows_written == 2
+    assert r_norm.rows_new == 2
+    assert r_norm.rows_revised == 0
 
     # ── DB state: overflow instrument has no rows ─────────────────────────────
     overflow_count = db_session.execute(
@@ -509,3 +612,5 @@ def test_backfill_db_savepoint_isolates_write_failure(db_session):
     ).scalar_one()
     assert ok_item.status == "ok"
     assert ok_item.rows_written == 2
+    assert ok_item.rows_new == 2
+    assert ok_item.rows_revised == 0

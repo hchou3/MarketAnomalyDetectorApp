@@ -8,6 +8,7 @@ import pytest
 from market_anomaly_detector.db.known_at import compute_known_at, obs_period_end
 from market_anomaly_detector.db.models import (
     Base,
+    DataQualityFlagRow,
     IngestionRunRow,
     InstrumentRow,
     LabelRow,
@@ -17,11 +18,16 @@ from market_anomaly_detector.db.models import (
 from market_anomaly_detector.db.repository import (
     add_run_item,
     finish_run,
+    get_flag_counts_by_rule,
+    get_instrument_last_dates,
     get_last_price_date,
+    get_last_run,
+    get_price_coverage,
     start_run,
     sync_registry,
     upsert_labels,
     upsert_prices,
+    write_quality_flags,
 )
 from market_anomaly_detector.registry import load_registry
 
@@ -193,9 +199,10 @@ def test_upsert_prices_inserts_rows(db_session):
             run_id=None,
         )
     ]
-    n = upsert_prices(db_session, rows)
+    n_new, n_revised = upsert_prices(db_session, rows)
     db_session.flush()
-    assert n == 1
+    assert n_new == 1
+    assert n_revised == 0
 
     from sqlalchemy import select
 
@@ -219,13 +226,15 @@ def test_upsert_prices_updates_existing(db_session):
         known_at=date(2023, 2, 2),
         run_id=None,
     )
-    n1 = upsert_prices(db_session, [{**base, "value": Decimal("100.0")}])
+    n1_new, n1_revised = upsert_prices(db_session, [{**base, "value": Decimal("100.0")}])
     db_session.flush()
-    assert n1 == 1
+    assert n1_new == 1
+    assert n1_revised == 0
 
-    n2 = upsert_prices(db_session, [{**base, "value": Decimal("200.0")}])
+    n2_new, n2_revised = upsert_prices(db_session, [{**base, "value": Decimal("200.0")}])
     db_session.flush()
-    assert n2 == 1  # value changed → row returned by RETURNING
+    assert n2_new == 0  # not a new insert — existing row was updated
+    assert n2_revised == 1  # value changed → revision
 
     from sqlalchemy import select
 
@@ -242,7 +251,7 @@ def test_upsert_prices_updates_existing(db_session):
 
 @pytest.mark.db
 def test_upsert_prices_repeated_load_returns_zero(db_session):
-    """Upserting identical rows a second time must return 0 (no changes made)."""
+    """Upserting identical rows a second time must return (0, 0) (no changes made)."""
     _insert_instrument(db_session, "repeat_test")
     row = dict(
         instrument_id="repeat_test",
@@ -252,13 +261,15 @@ def test_upsert_prices_repeated_load_returns_zero(db_session):
         known_at=date(2023, 3, 2),
         run_id=None,
     )
-    n1 = upsert_prices(db_session, [row])
+    n1_new, n1_revised = upsert_prices(db_session, [row])
     db_session.flush()
-    assert n1 == 1
+    assert n1_new == 1
+    assert n1_revised == 0
 
-    n2 = upsert_prices(db_session, [row])
+    n2_new, n2_revised = upsert_prices(db_session, [row])
     db_session.flush()
-    assert n2 == 0
+    assert n2_new == 0
+    assert n2_revised == 0
 
 
 @pytest.mark.db
@@ -313,9 +324,10 @@ def test_upsert_prices_large_batch(db_session):
         )
         for i in range(n_rows)
     ]
-    n = upsert_prices(db_session, rows)
+    n_new, n_revised = upsert_prices(db_session, rows)
     db_session.flush()
-    assert n == n_rows
+    assert n_new == n_rows
+    assert n_revised == 0
 
 
 # ── upsert_labels ─────────────────────────────────────────────────────────────
@@ -418,14 +430,14 @@ def test_get_last_price_date_returns_latest(db_session):
 
 @pytest.mark.db
 def test_migration_is_at_head(db_engine):
-    """After alembic upgrade head the DB must be at the expected revision."""
+    """After alembic upgrade head the DB must be at the latest revision."""
     from alembic.runtime.migration import MigrationContext
 
     with db_engine.connect() as conn:
         ctx = MigrationContext.configure(conn)
         heads = ctx.get_current_heads()
 
-    assert "a1b2c3d4e5f6" in heads, f"Expected revision a1b2c3d4e5f6 in heads, got {heads!r}"
+    assert "b2c3d4e5f6a7" in heads, f"Expected revision b2c3d4e5f6a7 in heads, got {heads!r}"
 
 
 @pytest.mark.db
@@ -451,3 +463,229 @@ def test_no_model_drift(db_engine):
         "Model/migration drift — run 'alembic revision --autogenerate' to create a "
         f"new migration. Missing from DB: {missing_from_db}"
     )
+
+
+@pytest.mark.db
+def test_migration_b2c3_downgrade_upgrade(db_engine):
+    """The b2c3d4e5f6a7 migration can be downgraded and re-upgraded cleanly."""
+    import sqlalchemy as _sa
+    from alembic.config import Config as _AlembicConfig
+    from alembic.runtime.migration import MigrationContext
+
+    from alembic import command as _alembic_command
+    from market_anomaly_detector.paths import REPO_ROOT
+
+    # str(url) masks the password as "***"; render it explicitly for Alembic.
+    url = db_engine.url.render_as_string(hide_password=False)
+    alembic_cfg = _AlembicConfig(str(REPO_ROOT / "alembic.ini"))
+    alembic_cfg.attributes["database_url"] = url
+
+    # ── downgrade one step ────────────────────────────────────────────────────
+    _alembic_command.downgrade(alembic_cfg, "-1")
+
+    insp = _sa.inspect(db_engine)
+    assert not insp.has_table("data_quality_flags"), "data_quality_flags must be dropped"
+    col_names = {c["name"] for c in insp.get_columns("ingestion_run_items")}
+    assert "rows_new" not in col_names
+    assert "rows_revised" not in col_names
+
+    with db_engine.connect() as conn:
+        ctx = MigrationContext.configure(conn)
+        mid_heads = ctx.get_current_heads()
+    assert "a1b2c3d4e5f6" in mid_heads
+
+    # ── re-upgrade to head ────────────────────────────────────────────────────
+    _alembic_command.upgrade(alembic_cfg, "head")
+
+    insp2 = _sa.inspect(db_engine)
+    assert insp2.has_table("data_quality_flags")
+    col_names2 = {c["name"] for c in insp2.get_columns("ingestion_run_items")}
+    assert "rows_new" in col_names2
+    assert "rows_revised" in col_names2
+
+
+# ── write_quality_flags ───────────────────────────────────────────────────────
+
+
+@pytest.mark.db
+def test_write_quality_flags_persists(db_session):
+    from sqlalchemy import select
+
+    from market_anomaly_detector.validation import ValidationFlag
+
+    _insert_instrument(db_session, "flag_test")
+    flags = [
+        ValidationFlag(obs_date=date(2024, 1, 2), rule="large_move", detail="20% move"),
+        ValidationFlag(obs_date=date(2024, 1, 3), rule="negative_value", detail="value=-5.0"),
+    ]
+    write_quality_flags(db_session, flags, instrument_id="flag_test", provider="yahoo", run_id=None)
+    db_session.flush()
+
+    rows = (
+        db_session.execute(
+            select(DataQualityFlagRow).where(DataQualityFlagRow.instrument_id == "flag_test")
+        )
+        .scalars()
+        .all()
+    )
+    assert len(rows) == 2
+    rules = {r.rule for r in rows}
+    assert rules == {"large_move", "negative_value"}
+
+
+# ── backfill then update writes 0 new and 0 revised ──────────────────────────
+
+
+@pytest.mark.db
+def test_update_after_full_backfill_writes_nothing(db_session):
+    """Backfill then immediate update must produce 0 new rows and 0 revised rows."""
+    from decimal import Decimal
+
+    # Insert instrument
+    _insert_instrument(db_session, "stable_inst")
+    db_session.flush()
+
+    rows = [
+        dict(
+            instrument_id="stable_inst",
+            provider="fred",
+            obs_date=date(2024, 1, d),
+            value=Decimal(str(d * 10)),
+            known_at=date(2024, 1, d),
+            run_id=None,
+        )
+        for d in range(2, 6)  # Jan 2–5
+    ]
+    n_new, n_revised = upsert_prices(db_session, rows)
+    db_session.flush()
+    assert n_new == 4
+
+    # "Update" = upsert the same rows again — must be (0, 0)
+    n2_new, n2_revised = upsert_prices(db_session, rows)
+    db_session.flush()
+    assert n2_new == 0
+    assert n2_revised == 0
+
+
+@pytest.mark.db
+def test_update_changed_value_counts_as_revision(db_session):
+    """When an existing row's value changes, it is counted as a revision."""
+    from decimal import Decimal
+
+    _insert_instrument(db_session, "revised_inst")
+    db_session.flush()
+
+    base = dict(
+        instrument_id="revised_inst",
+        provider="fred",
+        obs_date=date(2024, 3, 1),
+        known_at=date(2024, 3, 2),
+        run_id=None,
+    )
+    n_new, _ = upsert_prices(db_session, [{**base, "value": Decimal("100.0")}])
+    db_session.flush()
+    assert n_new == 1
+
+    n2_new, n2_revised = upsert_prices(db_session, [{**base, "value": Decimal("101.5")}])
+    db_session.flush()
+    assert n2_new == 0
+    assert n2_revised == 1
+
+
+# ── add_run_item rows_new / rows_revised ──────────────────────────────────────
+
+
+@pytest.mark.db
+def test_add_run_item_stores_rows_new_revised(db_session):
+    run = start_run(db_session, mode="update")
+    db_session.flush()
+
+    _insert_instrument(db_session, "split_count_inst")
+    item = add_run_item(
+        db_session,
+        run,
+        instrument_id="split_count_inst",
+        provider="fred",
+        status="ok",
+        rows_new=7,
+        rows_revised=3,
+        first_date=date(2024, 1, 2),
+        last_date=date(2024, 1, 10),
+    )
+    db_session.flush()
+
+    assert item.rows_new == 7
+    assert item.rows_revised == 3
+    assert item.rows_written == 10  # sum
+
+
+# ── get_last_run, get_price_coverage, get_flag_counts_by_rule, get_instrument_last_dates ──
+
+
+@pytest.mark.db
+def test_status_queries_on_empty_db(db_session):
+    """Status query helpers must not raise on an empty database."""
+    last_run = get_last_run(db_session)
+    assert last_run is None
+
+    coverage = get_price_coverage(db_session)
+    assert coverage == []
+
+    flag_counts = get_flag_counts_by_rule(db_session)
+    assert flag_counts == []
+
+    last_dates = get_instrument_last_dates(db_session)
+    assert last_dates == []
+
+
+@pytest.mark.db
+def test_status_queries_with_data(db_session):
+    from decimal import Decimal
+
+    from market_anomaly_detector.validation import ValidationFlag
+
+    _insert_instrument(db_session, "status_inst")
+    db_session.flush()
+
+    rows = [
+        dict(
+            instrument_id="status_inst",
+            provider="fred",
+            obs_date=date(2024, 1, d),
+            value=Decimal("100.0"),
+            known_at=date(2024, 1, d),
+            run_id=None,
+        )
+        for d in range(2, 5)
+    ]
+    upsert_prices(db_session, rows)
+    db_session.flush()
+
+    flags = [ValidationFlag(obs_date=date(2024, 1, 2), rule="large_move", detail="test")]
+    write_quality_flags(
+        db_session, flags, instrument_id="status_inst", provider="fred", run_id=None
+    )
+    db_session.flush()
+
+    run = start_run(db_session, mode="update")
+    finish_run(db_session, run, "success", 1, 0, 3)
+    db_session.flush()
+
+    last_run = get_last_run(db_session)
+    assert last_run is not None
+    assert last_run.mode == "update"
+
+    coverage = get_price_coverage(db_session)
+    assert len(coverage) == 1
+    assert coverage[0].instrument_id == "status_inst"
+    assert coverage[0].row_count == 3
+
+    flag_counts = get_flag_counts_by_rule(db_session)
+    assert len(flag_counts) == 1
+    assert flag_counts[0].rule == "large_move"
+    assert flag_counts[0].count == 1
+
+    last_dates = get_instrument_last_dates(db_session)
+    assert len(last_dates) == 1
+    assert last_dates[0].id == "status_inst"
+    assert last_dates[0].last_obs_date == date(2024, 1, 4)
