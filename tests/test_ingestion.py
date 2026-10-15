@@ -1,7 +1,8 @@
-"""Offline tests for the ingestion engine.
+"""Tests for the ingestion engine.
 
-All tests run without a database — providers are replaced with FakeProvider
-instances and writes go to in-memory sinks.
+Most tests are offline (no DB) — providers are replaced with FakeProvider
+instances and writes go to in-memory sinks.  The ``@pytest.mark.db`` tests
+at the bottom exercise PostgresPriceSink against a real database.
 """
 
 from __future__ import annotations
@@ -11,6 +12,7 @@ from datetime import date
 from typing import Any, Optional
 
 import pandas as pd
+import pytest
 
 from market_anomaly_detector.ingestion import run_backfill
 from market_anomaly_detector.registry import (
@@ -368,3 +370,142 @@ def test_backfill_missing_provider_in_map():
     r = results[0]
     assert r.status == "error"
     assert r.rows_written == 0
+
+
+# ── DB tests (require Postgres) ───────────────────────────────────────────────
+
+
+def _insert_instrument_row(session, instrument_id: str):
+    """Insert a minimal InstrumentRow directly (bypasses registry sync)."""
+    from market_anomaly_detector.db.models import InstrumentRow
+
+    row = InstrumentRow(
+        id=instrument_id,
+        name=f"Test {instrument_id}",
+        asset_class="volatility",
+        units="index_points",
+        quote="points",
+        native_frequency="daily",
+        notes="",
+        active=True,
+    )
+    session.add(row)
+    session.flush()
+    return row
+
+
+@pytest.mark.db
+def test_backfill_db_savepoint_isolates_write_failure(db_session):
+    """DB-level write failure rolls back only that instrument's rows.
+
+    Scenario: two instruments, same Yahoo provider.  The first returns a value
+    that overflows Numeric(20, 8) — ``1e15`` has 16 integer digits, exceeding
+    the 12-integer-digit limit.  The second returns valid data.
+
+    Expected outcomes:
+    - ``inst_overflow`` result: status="error", rows_written=0, 0 rows in DB
+    - ``inst_normal`` result:   status="ok",    rows_written=2, 2 rows in DB
+    - Run items record both outcomes correctly
+    """
+    from sqlalchemy import func, select
+
+    from market_anomaly_detector.db.models import IngestionRunItemRow, PriceRow
+    from market_anomaly_detector.db.repository import add_run_item, start_run
+    from market_anomaly_detector.ingestion import PostgresPriceSink, run_backfill
+
+    _insert_instrument_row(db_session, "inst_overflow")
+    _insert_instrument_row(db_session, "inst_normal")
+    db_session.flush()
+
+    inst_overflow = _inst("inst_overflow", [_src("yahoo", "OVER=X", 1)])
+    inst_normal = _inst("inst_normal", [_src("yahoo", "NORM=X", 1)])
+
+    # 1e15 = 10^15 overflows Numeric(20, 8) (max 12 integer digits)
+    overflow_df = pd.DataFrame({"obs_date": [date(2024, 1, 2)], "value": [1e15]})
+    normal_df = pd.DataFrame(
+        {
+            "obs_date": [date(2024, 1, 2), date(2024, 1, 3)],
+            "value": [100.0, 101.0],
+        }
+    )
+    providers = {
+        "yahoo": FakeProvider(
+            "yahoo",
+            {"OVER=X": overflow_df, "NORM=X": normal_df},
+        )
+    }
+
+    run = start_run(db_session, mode="backfill")
+    db_session.flush()
+
+    sink = PostgresPriceSink(db_session)
+    results = run_backfill(
+        [inst_overflow, inst_normal],
+        providers=providers,
+        sink=sink,
+        session=db_session,
+        run_id=run.id,
+    )
+
+    # Record run items from results (mirrors what the CLI does)
+    for r in results:
+        if r.status == "ok":
+            add_run_item(
+                db_session,
+                run,
+                r.instrument_id,
+                r.provider,
+                "ok",
+                rows_written=r.rows_written,
+                first_date=r.first_date,
+                last_date=r.last_date,
+            )
+        else:
+            add_run_item(
+                db_session,
+                run,
+                r.instrument_id,
+                r.provider or "yahoo",
+                "error",
+                error=r.error,
+            )
+    db_session.flush()
+
+    # ── InstrumentResult assertions ───────────────────────────────────────────
+    r_over = next(r for r in results if r.instrument_id == "inst_overflow")
+    r_norm = next(r for r in results if r.instrument_id == "inst_normal")
+
+    assert r_over.status == "error"
+    assert r_over.rows_written == 0
+    assert r_norm.status == "ok"
+    assert r_norm.rows_written == 2
+
+    # ── DB state: overflow instrument has no rows ─────────────────────────────
+    overflow_count = db_session.execute(
+        select(func.count()).select_from(PriceRow).where(PriceRow.instrument_id == "inst_overflow")
+    ).scalar_one()
+    assert overflow_count == 0, "Overflow rows must be rolled back by the savepoint"
+
+    normal_count = db_session.execute(
+        select(func.count()).select_from(PriceRow).where(PriceRow.instrument_id == "inst_normal")
+    ).scalar_one()
+    assert normal_count == 2
+
+    # ── Run items: one error entry, one ok entry ──────────────────────────────
+    error_item = db_session.execute(
+        select(IngestionRunItemRow).where(
+            IngestionRunItemRow.run_id == run.id,
+            IngestionRunItemRow.instrument_id == "inst_overflow",
+        )
+    ).scalar_one()
+    assert error_item.status == "error"
+    assert error_item.rows_written == 0
+
+    ok_item = db_session.execute(
+        select(IngestionRunItemRow).where(
+            IngestionRunItemRow.run_id == run.id,
+            IngestionRunItemRow.instrument_id == "inst_normal",
+        )
+    ).scalar_one()
+    assert ok_item.status == "ok"
+    assert ok_item.rows_written == 2
