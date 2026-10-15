@@ -14,8 +14,9 @@ from __future__ import annotations
 import contextlib
 from dataclasses import dataclass
 from datetime import date
-from typing import Any, Optional, Protocol, runtime_checkable
+from typing import Any, Callable, Optional, Protocol, runtime_checkable
 
+import numpy as np
 import pandas as pd
 
 from .db.known_at import compute_known_at
@@ -29,8 +30,8 @@ class PriceSink(Protocol):
     Postgres now; a Kafka producer in Phase 8.
     """
 
-    def write(self, rows: list[dict]) -> int:
-        """Upsert *rows* and return the count of rows inserted or changed."""
+    def write(self, rows: list[dict]) -> tuple[int, int]:
+        """Upsert *rows* and return ``(rows_new, rows_revised)``."""
         ...
 
 
@@ -40,7 +41,7 @@ class PostgresPriceSink:
     def __init__(self, session: Any) -> None:
         self._session = session
 
-    def write(self, rows: list[dict]) -> int:
+    def write(self, rows: list[dict]) -> tuple[int, int]:
         from .db.repository import upsert_prices
 
         return upsert_prices(self._session, rows)
@@ -53,10 +54,15 @@ class InstrumentResult:
     instrument_id: str
     provider: Optional[str]  # which provider succeeded; None on error/skip
     status: str  # "ok" | "error" | "skipped"
-    rows_written: int
-    first_date: Optional[date]
-    last_date: Optional[date]
-    error: Optional[str]
+    rows_new: int = 0
+    rows_revised: int = 0
+    first_date: Optional[date] = None
+    last_date: Optional[date] = None
+    error: Optional[str] = None
+
+    @property
+    def rows_written(self) -> int:
+        return self.rows_new + self.rows_revised
 
 
 def run_backfill(
@@ -67,6 +73,7 @@ def run_backfill(
     session: Any = None,
     run_id: Optional[int] = None,
     since: Optional[date] = None,
+    get_start: Optional[Callable[[str, str], Optional[date]]] = None,
 ) -> list[InstrumentResult]:
     """Fetch and store prices for *instruments* using *providers* and *sink*.
 
@@ -87,12 +94,41 @@ def run_backfill(
         If provided, stored on every price row as ``run_id``.
     since:
         Fetch data from this date onward.  ``None`` = full history.
+        Ignored when *get_start* is provided.
+    get_start:
+        Optional callable ``(instrument_id, provider) -> date | None`` that
+        returns the fetch start date for each (instrument, provider) pair.
+        When it returns ``None``, the full history is fetched.
+        Takes precedence over *since*.
     """
     results: list[InstrumentResult] = []
     for instrument in instruments:
-        result = _process_one(instrument, providers, sink, run_id, since, session)
+        result = _process_one(instrument, providers, sink, run_id, get_start, since, session)
         results.append(result)
     return results
+
+
+def is_stale(
+    last_obs_date: Optional[date],
+    native_frequency: str,
+    today: Optional[date] = None,
+) -> bool:
+    """Return True if the instrument is overdue for an update.
+
+    Thresholds: daily → 5 business days; weekly → 10 calendar days;
+    monthly → 45 calendar days.
+    """
+    if today is None:
+        today = date.today()
+    if last_obs_date is None:
+        return True
+    if native_frequency == "daily":
+        n_bdays = int(np.busday_count(last_obs_date.isoformat(), today.isoformat()))
+        return n_bdays >= 5
+    elif native_frequency == "weekly":
+        return (today - last_obs_date).days >= 10
+    else:  # monthly
+        return (today - last_obs_date).days >= 45
 
 
 # ── Internal helpers ──────────────────────────────────────────────────────────
@@ -103,9 +139,12 @@ def _process_one(
     providers: dict[str, Any],
     sink: PriceSink,
     run_id: Optional[int],
+    get_start: Optional[Callable[[str, str], Optional[date]]],
     since: Optional[date],
     session: Any,
 ) -> InstrumentResult:
+    from .validation import validate_provider_output
+
     live_sources = sorted(
         [s for s in instrument.sources if s.provider != "bloomberg_ews" and s.symbol],
         key=lambda s: s.priority,
@@ -116,9 +155,6 @@ def _process_one(
             instrument_id=instrument.id,
             provider=None,
             status="skipped",
-            rows_written=0,
-            first_date=None,
-            last_date=None,
             error="no live sources configured",
         )
 
@@ -138,23 +174,38 @@ def _process_one(
             else instrument.native_frequency.value
         )
 
+        effective_start = (
+            get_start(instrument.id, source.provider) if get_start is not None else since
+        )
+
         rows: list[dict] = []
-        n_written = 0
+        n_new = n_revised = 0
         error_msg: Optional[str] = None
 
         ctx = session.begin_nested() if session is not None else contextlib.nullcontext()
         try:
             with ctx:
-                df = provider.get_history(source.symbol, start=since)
+                df = provider.get_history(source.symbol, start=effective_start)
+                clean_df, flags = validate_provider_output(df, instrument)
                 rows = _to_price_rows(
-                    df,
+                    clean_df,
                     instrument_id=instrument.id,
                     provider=source.provider,
                     freq=freq,
                     lag=source.publication_lag_days,
                     run_id=run_id,
                 )
-                n_written = sink.write(rows) if rows else 0
+                n_new, n_revised = sink.write(rows) if rows else (0, 0)
+                if flags and session is not None:
+                    from .db.repository import write_quality_flags
+
+                    write_quality_flags(
+                        session,
+                        flags,
+                        instrument_id=instrument.id,
+                        provider=source.provider,
+                        run_id=run_id,
+                    )
         except Exception as exc:
             error_msg = str(exc)[:500]
 
@@ -163,7 +214,8 @@ def _process_one(
                 instrument_id=instrument.id,
                 provider=source.provider,
                 status="ok",
-                rows_written=n_written,
+                rows_new=n_new,
+                rows_revised=n_revised,
                 first_date=rows[0]["obs_date"] if rows else None,
                 last_date=rows[-1]["obs_date"] if rows else None,
                 error=None,
@@ -174,9 +226,6 @@ def _process_one(
         instrument_id=instrument.id,
         provider=last_provider,
         status="error",
-        rows_written=0,
-        first_date=None,
-        last_date=None,
         error="; ".join(errors)[:500] if errors else "all sources exhausted",
     )
 

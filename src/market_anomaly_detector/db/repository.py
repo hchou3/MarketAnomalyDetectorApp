@@ -9,12 +9,13 @@ from __future__ import annotations
 from datetime import date, datetime, timezone
 from typing import Optional
 
-from sqlalchemy import delete, or_, select
+from sqlalchemy import BigInteger, cast, delete, func, literal_column, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from ..registry import Instrument
 from .models import (
+    DataQualityFlagRow,
     IngestionRunItemRow,
     IngestionRunRow,
     InstrumentGroupRow,
@@ -108,12 +109,16 @@ def upsert_prices(
     session: Session,
     rows: list[dict],
     ingested_at: Optional[datetime] = None,
-) -> int:
-    """Batch-upsert price rows; return the number of rows inserted or changed.
+) -> tuple[int, int]:
+    """Batch-upsert price rows; return ``(rows_new, rows_revised)``.
 
     A row is only updated when *value* or *known_at* IS DISTINCT FROM the stored
-    value (NULL-safe comparison), so a repeated identical load returns 0 and
+    value (NULL-safe comparison), so a repeated identical load returns (0, 0) and
     the original *ingested_at* is preserved.
+
+    New inserts are identified by PostgreSQL's ``xmax = 0`` system column trick:
+    after ON CONFLICT DO UPDATE, ``xmax = 0`` for genuinely new rows and non-zero
+    for rows that were updated (value or known_at changed).
 
     Large batches are split into chunks of at most _PRICE_CHUNK rows to stay
     under Postgres's 65,535 bind-parameter limit.
@@ -122,9 +127,11 @@ def upsert_prices(
     (Decimal or float), known_at (date), and optionally run_id.
     """
     if not rows:
-        return 0
+        return (0, 0)
     ts = ingested_at or datetime.now(timezone.utc)
-    total = 0
+    total_new = 0
+    total_revised = 0
+    is_new_col = (cast(literal_column("xmax"), BigInteger) == 0).label("is_new")
     for chunk in _chunks(rows, _PRICE_CHUNK):
         payload = [{**r, "ingested_at": ts} for r in chunk]
         ins = pg_insert(PriceRow.__table__).values(payload)
@@ -140,10 +147,14 @@ def upsert_prices(
                 PriceRow.__table__.c.value.is_distinct_from(ins.excluded.value),
                 PriceRow.__table__.c.known_at.is_distinct_from(ins.excluded.known_at),
             ),
-        ).returning(PriceRow.__table__.c.id)
+        ).returning(PriceRow.__table__.c.id, is_new_col)
         result = session.execute(stmt)
-        total += len(result.fetchall())
-    return total
+        for row in result.fetchall():
+            if row.is_new:
+                total_new += 1
+            else:
+                total_revised += 1
+    return (total_new, total_revised)
 
 
 def upsert_labels(session: Session, rows: list[dict]) -> int:
@@ -172,6 +183,28 @@ def upsert_labels(session: Session, rows: list[dict]) -> int:
         result = session.execute(stmt)
         total += len(result.fetchall())
     return total
+
+
+def write_quality_flags(
+    session: Session,
+    flags: list,  # list[ValidationFlag] — avoid circular import
+    *,
+    instrument_id: str,
+    provider: str,
+    run_id: Optional[int] = None,
+) -> None:
+    """Persist validation flags for a single (instrument, provider) fetch."""
+    for flag in flags:
+        session.add(
+            DataQualityFlagRow(
+                run_id=run_id,
+                instrument_id=instrument_id,
+                provider=provider,
+                obs_date=flag.obs_date,
+                rule=flag.rule,
+                detail=flag.detail,
+            )
+        )
 
 
 def start_run(session: Session, mode: str) -> IngestionRunRow:
@@ -209,17 +242,30 @@ def add_run_item(
     provider: str,
     status: str,
     rows_written: int = 0,
+    rows_new: int = 0,
+    rows_revised: int = 0,
     first_date: Optional[date] = None,
     last_date: Optional[date] = None,
     error: Optional[str] = None,
 ) -> IngestionRunItemRow:
-    """Append a per-instrument outcome row to an ingestion run."""
+    """Append a per-instrument outcome row to an ingestion run.
+
+    When *rows_new* or *rows_revised* are provided, *rows_written* is computed
+    as their sum.  Pass *rows_written* alone for backward-compatible callers
+    that don't have the split counts.
+    """
+    if rows_new > 0 or rows_revised > 0:
+        total = rows_new + rows_revised
+    else:
+        total = rows_written
     item = IngestionRunItemRow(
         run_id=run.id,
         instrument_id=instrument_id,
         provider=provider,
         status=status,
-        rows_written=rows_written,
+        rows_written=total,
+        rows_new=rows_new,
+        rows_revised=rows_revised,
         first_date=first_date,
         last_date=last_date,
         error=error,
@@ -243,6 +289,55 @@ def get_last_price_date(
         .order_by(PriceRow.obs_date.desc())
         .limit(1)
     ).scalar_one_or_none()
+
+
+def get_last_run(session: Session) -> Optional[IngestionRunRow]:
+    """Return the most recent ingestion run row, or None."""
+    return session.execute(
+        select(IngestionRunRow).order_by(IngestionRunRow.started_at.desc()).limit(1)
+    ).scalar_one_or_none()
+
+
+def get_price_coverage(session: Session) -> list:
+    """Return per-(instrument_id, provider) coverage: first_date, last_date, row_count."""
+    return session.execute(
+        select(
+            PriceRow.instrument_id,
+            PriceRow.provider,
+            func.min(PriceRow.obs_date).label("first_date"),
+            func.max(PriceRow.obs_date).label("last_date"),
+            func.count().label("row_count"),
+        )
+        .group_by(PriceRow.instrument_id, PriceRow.provider)
+        .order_by(PriceRow.instrument_id, PriceRow.provider)
+    ).fetchall()
+
+
+def get_flag_counts_by_rule(session: Session) -> list:
+    """Return per-rule flag counts across all runs."""
+    return session.execute(
+        select(
+            DataQualityFlagRow.rule,
+            func.count().label("count"),
+        )
+        .group_by(DataQualityFlagRow.rule)
+        .order_by(DataQualityFlagRow.rule)
+    ).fetchall()
+
+
+def get_instrument_last_dates(session: Session) -> list:
+    """Return max obs_date and native_frequency per active instrument."""
+    return session.execute(
+        select(
+            InstrumentRow.id,
+            InstrumentRow.native_frequency,
+            func.max(PriceRow.obs_date).label("last_obs_date"),
+        )
+        .outerjoin(PriceRow, PriceRow.instrument_id == InstrumentRow.id)
+        .where(InstrumentRow.active.is_(True))
+        .group_by(InstrumentRow.id, InstrumentRow.native_frequency)
+        .order_by(InstrumentRow.id)
+    ).fetchall()
 
 
 # ── Internal helpers ──────────────────────────────────────────────────────────
