@@ -198,7 +198,7 @@ def record_yahoo() -> None:
 
     for sym, auto_adjust in sorted(symbol_meta.items()):
         try:
-            df = yf.Ticker(sym).history(period="max", auto_adjust=auto_adjust, progress=False)
+            df = yf.Ticker(sym).history(period="max", auto_adjust=auto_adjust)
             if df.empty:
                 print(f"  {sym:<15s} EMPTY — skipped")
                 continue
