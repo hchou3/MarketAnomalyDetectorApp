@@ -15,6 +15,16 @@ from market_anomaly_detector.paths import DATA_PATH, REPO_ROOT
 from market_anomaly_detector.pipeline import AnomalyPipeline
 from market_anomaly_detector.splits import split_timeseries
 
+
+def pytest_collection_modifyitems(items):
+    if os.environ.get("MAD_RUN_NETWORK") == "1":
+        return
+    skip = pytest.mark.skip(reason="network tests skipped; set MAD_RUN_NETWORK=1 to run")
+    for item in items:
+        if item.get_closest_marker("network"):
+            item.add_marker(skip)
+
+
 # ── Database fixtures (require MAD_TEST_DATABASE_URL) ────────────────────────
 #
 # Run instructions:
