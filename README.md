@@ -39,6 +39,32 @@ pip install -e . --no-deps
 Results depend on library versions (calibration choice and F1 change across
 scikit-learn releases), so use the locked versions when comparing metrics.
 
+## Database setup
+
+The data layer requires Postgres.  Start a local instance with Docker Compose, run
+the Alembic migrations, and populate the instrument registry before running any
+`mad-data` command.
+
+```bash
+docker compose up -d db
+uv run alembic upgrade head      # create all tables (run once, or after a migration)
+mad-data sync-registry           # load config/instruments.yaml → instruments + symbol_map
+mad-data load-ews                # load data/raw/ews_weekly_2000_2021.csv → prices + labels
+mad-data backfill                # fetch full history from Yahoo / FRED / Cboe
+```
+
+`mad-data` commands exit with code 2 and a clear message if migrations have not been
+run yet.  Set `MAD_DATABASE_URL` (default: `postgresql+psycopg://mad:mad@localhost:5432/mad`)
+or pass `--database-url` to override.
+
+For tests that require a live database:
+
+```bash
+docker compose up -d db
+export MAD_TEST_DATABASE_URL=postgresql+psycopg://mad:mad@localhost:5432/mad_test
+pytest -m db -v
+```
+
 ## Usage
 
 ```bash
