@@ -312,18 +312,60 @@ def test_schema_rejects_unknown_instrument_field():
         Instrument.model_validate(_minimal_instrument(typo_field="oops"))
 
 
-# ── Fix 3: FRED FX lag ────────────────────────────────────────────────────────
+# ── Fix 3: FRED FX lag and FX priority ────────────────────────────────────────
 
 
-def test_fred_fx_lag_at_least_three_days(registry):
-    """usd_jpy and gbp_usd FRED sources need lag > 1 to cover weekends (H.10 T+1 business day)."""
+def test_fred_fx_lag_at_least_ten_days(registry):
+    """usd_jpy and gbp_usd FRED sources use a conservative 10-day floor.
+
+    ALFRED-measured typical H.10 lag is 1–3 calendar days, but 10 days is used
+    as a guaranteed safe floor to cover holiday weekends and any publication
+    delays without risking look-ahead bias in backtests.
+    """
     fx_ids = {"usd_jpy", "gbp_usd"}
     for inst in registry:
         if inst.id not in fx_ids:
             continue
         fred_src = next((s for s in inst.sources if s.provider == "fred"), None)
         assert fred_src is not None, f"{inst.id} has no FRED source"
-        assert fred_src.publication_lag_days >= 3, (
+        assert fred_src.publication_lag_days >= 10, (
             f"{inst.id} FRED lag={fred_src.publication_lag_days}; "
-            "must be >= 3 to cover weekend gaps in H.10 release"
+            "must be >= 10 (conservative floor for H.10 FX release)"
         )
+
+
+def test_yahoo_is_priority_1_for_fx(registry):
+    """Yahoo must be the primary (priority 1) source for usd_jpy and gbp_usd.
+
+    FRED H.10 FX data carries a 10-day lag; Yahoo provides same-day spot rates
+    with no meaningful delay and should be used for live ingestion.
+    """
+    fx_ids = {"usd_jpy", "gbp_usd"}
+    for inst in registry:
+        if inst.id not in fx_ids:
+            continue
+        yahoo_src = next((s for s in inst.sources if s.provider == "yahoo"), None)
+        assert yahoo_src is not None, f"{inst.id} has no Yahoo source"
+        assert yahoo_src.priority == 1, (
+            f"{inst.id} Yahoo source has priority={yahoo_src.priority}; expected 1"
+        )
+
+
+# ── Step 4: auto_adjust enforcement for Yahoo ETFs ────────────────────────────
+
+_YAHOO_ETF_SYMBOLS = {"DBC", "MBB", "MUB", "LQD", "HYG", "EMB", "VGK", "EWJ", "EWZ", "INDA", "MCHI"}
+
+
+def test_yahoo_etf_sources_have_auto_adjust(registry):
+    """ETF proxies on Yahoo must set auto_adjust=True to get total-return prices.
+
+    These ETFs distribute dividends that would otherwise make their price series
+    non-comparable to the Bloomberg total-return indices they proxy.
+    """
+    for inst in registry:
+        for src in inst.sources:
+            if src.provider == "yahoo" and src.symbol in _YAHOO_ETF_SYMBOLS:
+                assert src.auto_adjust, (
+                    f"Instrument {inst.id!r}: Yahoo ETF source {src.symbol!r} "
+                    "must have auto_adjust=True for total-return prices"
+                )

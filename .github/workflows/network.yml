@@ -1,0 +1,31 @@
+name: Network tests
+
+on:
+  schedule:
+    - cron: "0 6 * * 1"  # weekly Monday 06:00 UTC
+  workflow_dispatch:
+
+jobs:
+  network:
+    name: Network tests (Python 3.13)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          version: "latest"
+
+      - name: Set up Python 3.13
+        run: uv python install 3.13
+
+      - name: Install dependencies from lock file
+        run: uv sync --frozen --extra dev --python 3.13
+
+      - name: Run network tests
+        env:
+          MAD_RUN_NETWORK: "1"
+        run: uv run pytest -m network -v
+        continue-on-error: true
