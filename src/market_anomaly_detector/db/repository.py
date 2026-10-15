@@ -9,7 +9,7 @@ from __future__ import annotations
 from datetime import date, datetime, timezone
 from typing import Optional
 
-from sqlalchemy import BigInteger, cast, delete, func, literal_column, or_, select
+from sqlalchemy import delete, func, literal_column, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -131,7 +131,9 @@ def upsert_prices(
     ts = ingested_at or datetime.now(timezone.utc)
     total_new = 0
     total_revised = 0
-    is_new_col = (cast(literal_column("xmax"), BigInteger) == 0).label("is_new")
+    # xmax = 0 marks rows inserted by this statement; xid compares to an integer
+    # directly (it cannot be cast to BIGINT).
+    is_new_col = literal_column("(prices.xmax = 0)").label("is_new")
     for chunk in _chunks(rows, _PRICE_CHUNK):
         payload = [{**r, "ingested_at": ts} for r in chunk]
         ins = pg_insert(PriceRow.__table__).values(payload)
