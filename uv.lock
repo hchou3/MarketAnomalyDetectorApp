@@ -399,7 +399,7 @@ requires-dist = [
     { name = "scikit-learn", specifier = ">=1.6" },
     { name = "shap" },
     { name = "sqlalchemy", specifier = ">=2" },
-    { name = "yfinance", specifier = ">=0.2" },
+    { name = "yfinance", specifier = ">=1.0" },
 ]
 provides-extras = ["dev"]
 

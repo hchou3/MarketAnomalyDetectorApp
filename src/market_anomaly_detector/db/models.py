@@ -128,8 +128,24 @@ class IngestionRunItemRow(Base):
     provider: Mapped[str] = mapped_column(String(32), primary_key=True)
     status: Mapped[str] = mapped_column(String(16))
     rows_written: Mapped[int] = mapped_column(BigInteger, default=0)
+    rows_new: Mapped[int] = mapped_column(BigInteger, default=0)
+    rows_revised: Mapped[int] = mapped_column(BigInteger, default=0)
     first_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
     last_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
     error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     run: Mapped[IngestionRunRow] = relationship(back_populates="items")
+
+
+class DataQualityFlagRow(Base):
+    __tablename__ = "data_quality_flags"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    run_id: Mapped[Optional[int]] = mapped_column(
+        BigInteger, ForeignKey("ingestion_runs.id"), nullable=True
+    )
+    instrument_id: Mapped[str] = mapped_column(String(64), ForeignKey("instruments.id"))
+    provider: Mapped[str] = mapped_column(String(32))
+    obs_date: Mapped[date] = mapped_column(Date)
+    rule: Mapped[str] = mapped_column(String(64))
+    detail: Mapped[str] = mapped_column(Text)
