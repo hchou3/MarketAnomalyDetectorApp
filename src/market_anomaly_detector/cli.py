@@ -10,6 +10,24 @@ from pathlib import Path
 
 log = logging.getLogger(__name__)
 
+_DB_NOT_INIT_MSG = "Database not initialized — run: uv run alembic upgrade head"
+
+
+def _require_db_ready(engine) -> None:
+    """Exit 2 if the instruments table does not exist.
+
+    Called before every database command so the error is clear when the DB
+    is reachable but migrations have not been run yet.  If the DB itself is
+    unreachable the connection attempt raises an ordinary exception which the
+    caller's ``except Exception`` handler catches.
+    """
+    from sqlalchemy import inspect as sa_inspect
+
+    insp = sa_inspect(engine)
+    if not insp.has_table("instruments"):
+        print(_DB_NOT_INIT_MSG, file=sys.stderr)
+        raise SystemExit(2)
+
 
 # ── sync-registry ─────────────────────────────────────────────────────────────
 
@@ -30,6 +48,7 @@ def _cmd_sync_registry(args: argparse.Namespace) -> int:
     try:
         engine = create_engine(url=args.database_url)
         with Session(engine) as session:
+            _require_db_ready(engine)
             sync_registry(session, instruments)
             session.commit()
     except Exception as exc:
@@ -50,10 +69,15 @@ def _cmd_load_ews(args: argparse.Namespace) -> int:
     from .db.engine import create_engine
     from .providers.ews import load_ews
 
-    engine = create_engine(url=args.database_url)
-    with Session(engine) as session:
-        result = load_ews(session, csv_path=args.csv)
-        session.commit()
+    try:
+        engine = create_engine(url=args.database_url)
+        with Session(engine) as session:
+            _require_db_ready(engine)
+            result = load_ews(session, csv_path=args.csv)
+            session.commit()
+    except Exception as exc:
+        print(f"ERROR: database error: {exc}", file=sys.stderr)
+        return 1
 
     print(
         f"load-ews: {result['prices_written']} price rows, "
@@ -132,6 +156,7 @@ def _cmd_backfill(args: argparse.Namespace) -> int:
 
     try:
         with Session(engine) as session:
+            _require_db_ready(engine)
             sync_registry(session, instruments)
             session.flush()
 
