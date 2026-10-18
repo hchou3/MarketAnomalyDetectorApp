@@ -2,8 +2,18 @@
 
 **Parent plan:** `architecture-plan.md`, section 6, Phase 1 (specs in 4.1, 4.2, 5.1).
 **Written:** 2026-10-13, against `main` + `phase1-fixes` + `walk-forward-backtest`.
+**Updated:** 2026-10-18 — Steps 1–5 merged; Steps 6–7 on open PRs.
 **Prerequisite:** Phase 0 merged (PR #3).
 **Branches:** one branch and PR per step (`phase-1/<step>`), merged in order.
+
+**Step completion status:**
+- Step 1 — Instrument registry: **complete** (merged)
+- Step 2 — Database: **complete** (merged)
+- Step 3 — Load the EWS CSV: **complete** (merged)
+- Step 4 — Live providers: **complete** (merged)
+- Step 5 — Ingestion CLI: **complete** (merged; includes update, status, validation, staleness)
+- Step 6 — Coverage and fidelity report: **PR open** (#12 on `phase-1/step-6-coverage-report`)
+- Step 7 — Retire the stress script, update docs: **PR open** (this branch)
 
 ## Goal
 

@@ -129,11 +129,12 @@ These keep earlier phases compatible with the serving and live stacks:
 
 ---
 
-## 3. Current state (after Phase 0, 2026-10-13)
+## 3. Current state (after Phase 1, 2026-10-18)
 
-**Branches.** `main` holds the merged `phase1-fixes` and `walk-forward-backtest` work.
-`phase-0/repo-hygiene-v2` holds Phase 0 on top of it, pending review. The first
-attempt, `phase-0/repo-hygiene`, was built from the old `main` and is superseded.
+**Branches.** `main` holds Phase 0 through Phase 1 Step 5B. Phase 1 Steps 6 and 7
+are on open PRs (`phase-1/step-6-coverage-report`, `phase-1/step-7-stress-parity`).
+Earlier superseded branches (`phase-0/repo-hygiene`, `phase1-fixes`,
+`walk-forward-backtest`) are kept for reference.
 
 **Headline results** (walk-forward backtest, 14 yearly folds, 2008 to 2021-04, 695
 out-of-sample weeks, 153 anomalies; full report in
@@ -153,18 +154,25 @@ calm-labelled weeks between and after the 2020 anomaly weeks.
 
 | Area | State | Action |
 |---|---|---|
-| Layout | `src/market_anomaly_detector/` (data, splits, pipeline, explain, train, backtest, paths); top-level `tests/`; `docs/`; `data/raw/`; `scripts/` | Done (Phase 0) |
-| Tooling | `pyproject.toml`; `uv.lock` pinned to `requirements.txt` (numpy 2.2.6, scipy 1.15.3, pandas 2.3.1, scikit-learn 1.6.1, shap 0.50.0, joblib 1.5.1); Python 3.12–3.13; ruff; CI on 3.12 and 3.13; commands `mad-train`, `mad-backtest` | Done (Phase 0). Results depend on these versions |
-| Tests | 32 passing on 3.12 and 3.13 | Keep green |
+| Layout | `src/market_anomaly_detector/` (data, splits, pipeline, explain, train, backtest, paths, registry, ingestion, coverage, stress_parity, providers/, db/); top-level `tests/`; `docs/`; `data/raw/`; `scripts/` | Done (Phase 0–1) |
+| Tooling | `pyproject.toml`; `uv.lock` pinned to `requirements.txt` (numpy 2.2.6, scipy 1.15.3, pandas 2.3.1, scikit-learn 1.6.1, shap 0.50.0, joblib 1.5.1); Python 3.12–3.13; ruff; CI on 3.12 and 3.13; commands `mad-train`, `mad-backtest`, `mad-data` | Done (Phase 0–1). Results depend on these versions |
+| Tests | 206 non-network tests passing on 3.13 | Keep green |
 | `data.py` | Features are raw price **levels** + MA crosses + `USD_Over_100` | Stationary features (Phase 2) |
-| `splits.py` / `train.py` | Single 9y/2y/1y split; test year is 60% positive. `train.py` writes a `.meta.json` sidecar (versions, splits, calibration report, metrics) | Headline metrics come from the backtest, not this split |
+| `splits.py` / `train.py` | Single 9y/2y/1y split; test year is 60% positive. `train.py` writes a `.meta.json` sidecar | Headline metrics come from the backtest, not this split |
 | `backtest.py` | Expanding-window yearly folds 2008–2021; val window extended back until ≥ 8 anomalies; pooled metrics, trivial baselines, AUCs, bootstrap | Extend in Phase 2: event-level metrics, predict head, new features |
-| `pipeline.py` | IsoForest score → StackingClassifier → calibration (`FrozenEstimator`), method chosen by OOF Brier on the val split | Re-evaluate after features change; selection by Brier can pick isotonic with a much worse log loss; verify ONNX export |
+| `pipeline.py` | IsoForest score → StackingClassifier → calibration (`FrozenEstimator`), method chosen by OOF Brier on the val split | Re-evaluate after features change; verify ONNX export |
 | `explain.py` | SHAP on the RF base learner only (class-1 extraction fixed and tested) | Explain the final model output (Phase 2) |
-| `scripts/fetch_stress_data.py` | Cboe/Yahoo/FRED stress series aligned to EWS Tuesdays with a FRED publication lag; output `data/raw/stress_extra.csv` | Replaced by Phase 1 providers |
-| Data | 42 Bloomberg-coded series; ~1/3 have no Yahoo/FRED source; labels end 2021-04; CSV source and license unknown in a public repo | Symbol map (Phase 1); open decisions 1–3 |
-| Network | Claude's workspace cannot reach Yahoo, FRED, or Cboe (egress policy) | Live fetches run on the user's machine or in GitHub Actions; Claude builds against recorded fixtures |
-| Lint exemptions | E501 off for `backtest.py` (report f-strings) and `scripts/fetch_stress_data.py` | Remove when those files are reworked |
+| Instrument registry | `config/instruments.yaml` — 50 instruments (42 EWS + 8 stress); Pydantic validation; `mad-data sync-registry` | Done (Phase 1 Step 1) |
+| Database | Postgres via SQLAlchemy 2 + Alembic; instruments, prices, labels, ingestion_runs, quality_flags tables | Done (Phase 1 Step 2) |
+| EWS data loader | `mad-data load-ews` → bloomberg_ews prices and ews_v1 labels; DB frame matches CSV exactly | Done (Phase 1 Step 3) |
+| Live providers | Yahoo, FRED, Cboe with recorded fixtures; retry/backoff; validation flags | Done (Phase 1 Step 4) |
+| Ingestion CLI | `mad-data backfill`, `update`, `status`; PriceSink; per-instrument isolation; staleness | Done (Phase 1 Step 5) |
+| Coverage report | `mad-data report` → `docs/reports/symbol-coverage.md`; fidelity scoring; gap detection (Step 6 PR open) | PR #12 open |
+| Stress parity | `mad-data parity-stress` → compares DB stress series vs stress_extra.csv; exit 1 on non-revised mismatches (Step 7 PR open) | This PR |
+| `scripts/fetch_stress_data.py` | Deleted (replaced by Phase 1 providers) | Done (Phase 1 Step 7) |
+| `data/raw/stress_extra.csv` | Kept as a frozen snapshot (fetch date ≤ 2026-10-13) | Reference for parity check |
+| Network | Claude's workspace cannot reach Yahoo, FRED, or Cboe (egress policy) | Live fetches run on the user's machine or in GitHub Actions |
+| Lint exemptions | E501 off for `backtest.py` (report f-strings) only; `fetch_stress_data.py` exemption removed | Remaining exemption removed when backtest.py is reworked in Phase 2 |
 
 ---
 
@@ -553,6 +561,9 @@ at the live frequency.
 | 2026-10-13 | Prices are stored raw at native frequency with point-in-time `known_at`; transforms and weekly alignment happen at feature time. Labels get their own table. |
 | 2026-10-13 | Phase 0 completed on `phase-0/repo-hygiene-v2` (supersedes `phase-0/repo-hygiene`). `uv.lock` pinned to the `requirements.txt` versions; `requires-python` capped at `<3.14` because pinned shap 0.50.0 has no 3.14 build. Training and backtest outputs identical to `main`. |
 | 2026-10-13 | Phase 1 plan written (`docs/phases/phase1-plan.md`). |
+| 2026-10-18 | Phase 1 Steps 1–5 merged to `main` (registry, DB, EWS loader, providers, ingestion CLI). Steps 6 (coverage report) and 7 (stress parity) on open PRs. |
+| 2026-10-18 | `scripts/fetch_stress_data.py` deleted; `data/raw/stress_extra.csv` kept as a frozen snapshot (fetch date ≤ 2026-10-13). The E501 lint exemption for that script removed from `pyproject.toml`. |
+| 2026-10-18 | `merge_asof` tolerance in `_align_weekly` (coverage report) tightened from 7 to 4 days so a weekly Cboe value can never bridge into the first gap week at the tolerance boundary. |
 
 ---
 

@@ -51,11 +51,19 @@ uv run alembic upgrade head      # create all tables (run once, or after a migra
 mad-data sync-registry           # load config/instruments.yaml → instruments + symbol_map
 mad-data load-ews                # load data/raw/ews_weekly_2000_2021.csv → prices + labels
 mad-data backfill                # fetch full history from Yahoo / FRED / Cboe
+mad-data update                  # fetch incremental data (last date - 5 days, catches revisions)
+mad-data status                  # last run summary, stale instruments, coverage, quality flags
+mad-data report                  # write docs/reports/symbol-coverage.md and data/reports/symbol-coverage.csv
+mad-data parity-stress           # verify DB stress series match data/raw/stress_extra.csv
 ```
 
 `mad-data` commands exit with code 2 and a clear message if migrations have not been
 run yet.  Set `MAD_DATABASE_URL` (default: `postgresql+psycopg://mad:mad@localhost:5432/mad`)
 or pass `--database-url` to override.
+
+`mad-data parity-stress` exits 1 if any non-revised series differs from the snapshot
+beyond 1e-6 or has missing weeks; differences in revised series (NFCI, STLFSI) are
+reported without failing.
 
 For tests that require a live database:
 
