@@ -458,6 +458,7 @@ def _align_weekly(live_df: pd.DataFrame, ews_df: pd.DataFrame) -> pd.DataFrame:
         live_s[["_dt", "live_value"]],
         on="_dt",
         direction="backward",
+        tolerance=pd.Timedelta(days=4),
     )
     return merged.dropna(subset=["ews_value", "live_value"]).reset_index(drop=True)
 

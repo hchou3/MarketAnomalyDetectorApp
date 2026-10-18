@@ -12,7 +12,6 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import pytest
 
 from market_anomaly_detector.coverage import (
     CoverageReport,
@@ -24,7 +23,6 @@ from market_anomaly_detector.coverage import (
     write_csv,
     write_markdown,
 )
-
 
 # ── Test helpers ──────────────────────────────────────────────────────────────
 
@@ -378,15 +376,49 @@ def test_find_gaps_exactly_at_boundary():
 def test_find_gaps_just_over_boundary():
     """6 business days must be flagged."""
     d1 = date(2024, 1, 12)  # Friday
-    d2 = date(
-        2024, 1, 22
-    )  # Monday after next = 6 bdays (Fri→Mon: skip Sat, Sun, Mon13–Fri19, Mon22)
-    # Fri Jan 12 → Mon Jan 22: business days = Jan 15, 16, 17, 18, 19, 22 = 6 bdays?
-    # Actually np.busday_count counts business days *between* two dates (exclusive of start, inclusive of end? no...)
-    # np.busday_count('2024-01-12', '2024-01-22') = days strictly between → Mon13,Tue14,...Fri19,Mon22 = 6
+    d2 = date(2024, 1, 22)  # Monday two weeks later; np.busday_count → 6
     gaps = find_gaps([d1, d2], min_bdays=5)
     assert len(gaps) == 1
     assert gaps[0].bdays == 6
+
+
+# ── compare_fidelity: tolerance prevents gap bridging ────────────────────────
+
+
+def test_gap_in_live_data_does_not_bridge_with_tolerance():
+    """A 4-year hole in the live series must not propagate stale values.
+
+    With tolerance=7 days in _align_weekly, EWS Tuesdays that fall in the
+    gap get NaN (no live match) and are excluded from the overlap.  The
+    remaining overlap must still give correlation 1.0 and suggest 'exact'.
+    """
+    # EWS: 10 years of weekly Tuesdays (520 weeks, 2005-01-04 to ~2014-12)
+    ews_start = date(2005, 1, 4)
+    ews_dates = _weekly_dates(ews_start, 520)
+    ews_vals = [100.0 + i * 0.3 + 0.5 * math.sin(i * 0.1) for i in range(520)]
+    ews = _df(ews_dates, ews_vals)
+
+    # Live: identical values but missing the middle ~4 years (2008-2012)
+    # Keep first 156 weeks (~3 yrs) and last 156 weeks (~3 yrs)
+    gap_start_idx = 156
+    gap_end_idx = 364  # skip 208 weeks
+    live_indices = list(range(gap_start_idx)) + list(range(gap_end_idx, 520))
+    live_dates = [ews_dates[i] for i in live_indices]
+    live_vals = [ews_vals[i] for i in live_indices]
+    live = _df(live_dates, live_vals)
+
+    result = compare_fidelity(live, ews, units="price", source_frequency="daily", is_exact=True)
+
+    # Overlap must be ~312 weeks (the non-gap portions), well above 104
+    assert result.sufficient
+    assert result.overlap_periods < 520  # gap weeks were excluded
+    assert result.overlap_periods >= 104  # enough remaining for a valid comparison
+
+    # Values are identical over the overlap, so correlation must be 1.0
+    assert result.change_correlation is not None
+    assert math.isclose(result.change_correlation, 1.0, abs_tol=1e-9)
+    assert result.suggested_fidelity == "exact"
+    assert not result.sign_inverted
 
 
 # ── write_markdown / write_csv: smoke tests ───────────────────────────────────
@@ -568,8 +600,6 @@ def test_fidelity_override_suppresses_sort():
         fidelity_mismatch=False,
         has_fidelity_override=False,
     )
-    from market_anomaly_detector.coverage import CoverageReport
-    import market_anomaly_detector.coverage as cov_mod
 
     # build_report sorts, but we can test the sort logic directly
     rows = [row_no_mismatch, row_with_override]
