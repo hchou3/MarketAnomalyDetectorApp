@@ -33,3 +33,7 @@ mad-train
 mad-backtest
 ruff check . && ruff format --check .
 ```
+
+## Commit rules
+
+- Do not add Co-Authored-By or other attribution lines to commits.

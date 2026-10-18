@@ -428,6 +428,35 @@ def _cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
+# ── parity-stress ─────────────────────────────────────────────────────────────
+
+_DEFAULT_STRESS_CSV = Path(__file__).parent.parent.parent / "data" / "raw" / "stress_extra.csv"
+
+
+def _cmd_parity_stress(args: argparse.Namespace) -> int:
+    from sqlalchemy.orm import Session
+
+    from .db.engine import create_engine
+    from .stress_parity import format_report, run_parity
+
+    csv_path: Path = args.csv if args.csv is not None else _DEFAULT_STRESS_CSV
+    if not csv_path.exists():
+        print(f"ERROR: stress CSV not found: {csv_path}", file=sys.stderr)
+        return 1
+
+    try:
+        engine = create_engine(url=args.database_url)
+        with Session(engine) as session:
+            _require_db_ready(engine)
+            results, exit_code, n_overlap = run_parity(session, csv_path)
+    except Exception as exc:
+        print(f"ERROR: database error: {exc}", file=sys.stderr)
+        return 1
+
+    print(format_report(results, n_overlap, csv_path))
+    return exit_code
+
+
 # ── main ──────────────────────────────────────────────────────────────────────
 
 
@@ -493,6 +522,20 @@ def main() -> None:
     )
     p.add_argument("--database-url", default=None, metavar="URL")
 
+    # ── parity-stress ─────────────────────────────────────────────────────────
+    p = subparsers.add_parser(
+        "parity-stress",
+        help="Verify DB stress series match stress_extra.csv on EWS Tuesdays.",
+    )
+    p.add_argument(
+        "--csv",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="Path to stress_extra.csv (default: data/raw/stress_extra.csv).",
+    )
+    p.add_argument("--database-url", default=None, metavar="URL")
+
     args = parser.parse_args()
     if args.command == "sync-registry":
         sys.exit(_cmd_sync_registry(args))
@@ -504,6 +547,8 @@ def main() -> None:
         sys.exit(_cmd_update(args))
     elif args.command == "status":
         sys.exit(_cmd_status(args))
+    elif args.command == "parity-stress":
+        sys.exit(_cmd_parity_stress(args))
     else:
         parser.print_help()
         sys.exit(1)

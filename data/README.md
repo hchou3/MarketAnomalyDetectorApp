@@ -37,8 +37,11 @@ from the repo, before sharing the project more widely (open decision 2).
 
 ## raw/stress_extra.csv
 
-Eight extra stress series aligned to the same 1,111 Tuesday dates, produced by
-`scripts/fetch_stress_data.py`:
+**Frozen snapshot** fetched on or before 2026-10-13. Do not re-run the retired
+`scripts/fetch_stress_data.py` (deleted in Phase 1 Step 7); use the database
+providers instead (`mad-data backfill` then `mad-data parity-stress`).
+
+Eight extra stress series aligned to the same 1,111 Tuesday dates:
 
 | Column | Source | Notes |
 |---|---|---|
@@ -46,6 +49,8 @@ Eight extra stress series aligned to the same 1,111 Tuesday dates, produced by
 | `NFCI` | FRED (Chicago Fed National Financial Conditions Index) | Weekly, Friday-dated; a value is used only from the Tuesday 11 days later |
 | `STLFSI` | FRED `STLFSI4` (St. Louis Fed Financial Stress Index) | Same publication-lag rule |
 
-NFCI history is revised after release, so today's download contains information that
-wasn't available at the time (open decision 11). This file is a snapshot of one
-download; Phase 1 replaces the script with data providers.
+NFCI and STLFSI are marked `revised: true` in the instrument registry; their
+published history is revised after initial release, so today's database values
+may differ slightly from the snapshot. Use `mad-data parity-stress` to compare
+the database against this file; differences in revised series are reported but
+do not cause the command to fail.
