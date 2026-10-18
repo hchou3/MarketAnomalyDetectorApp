@@ -428,6 +428,62 @@ def _cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
+# ── report ────────────────────────────────────────────────────────────────────
+
+
+def _cmd_report(args: argparse.Namespace) -> int:
+    from pathlib import Path
+
+    from sqlalchemy.orm import Session
+
+    from .coverage import build_report, write_csv, write_markdown
+    from .db.engine import create_engine
+    from .paths import REPO_ROOT
+    from .registry import load_registry
+
+    try:
+        instruments = load_registry()
+    except Exception as exc:
+        print(f"ERROR: failed to load registry: {exc}", file=sys.stderr)
+        return 1
+
+    try:
+        engine = create_engine(url=args.database_url)
+        with Session(engine) as session:
+            _require_db_ready(engine)
+            report = build_report(session, instruments)
+    except Exception as exc:
+        print(f"ERROR: database error: {exc}", file=sys.stderr)
+        return 1
+
+    md_path = (
+        Path(args.output_md)
+        if args.output_md
+        else REPO_ROOT / "docs" / "reports" / "symbol-coverage.md"
+    )
+    csv_path = (
+        Path(args.output_csv)
+        if args.output_csv
+        else REPO_ROOT / "data" / "reports" / "symbol-coverage.csv"
+    )
+
+    try:
+        write_markdown(report, md_path)
+        write_csv(report, csv_path)
+    except Exception as exc:
+        print(f"ERROR: writing report: {exc}", file=sys.stderr)
+        return 1
+
+    mismatches = sum(1 for r in report.rows if r.fidelity_mismatch and not r.has_fidelity_override)
+    print(f"report: {len(report.rows)} instruments, {mismatches} mismatch(es).")
+    print(f"  {md_path}")
+    print(f"  {csv_path}")
+
+    if args.check and mismatches > 0:
+        return 1
+    return 0
+
+
 # ── main ──────────────────────────────────────────────────────────────────────
 
 
@@ -493,6 +549,34 @@ def main() -> None:
     )
     p.add_argument("--database-url", default=None, metavar="URL")
 
+    # ── report ────────────────────────────────────────────────────────────────
+    p = subparsers.add_parser(
+        "report",
+        help=(
+            "Write symbol-coverage.md and symbol-coverage.csv from the database. "
+            "Use --check to exit 1 when any YAML fidelity mismatches the computed suggestion."
+        ),
+    )
+    p.add_argument(
+        "--check",
+        action="store_true",
+        help="Exit 1 if any instrument's YAML fidelity doesn't match the suggestion "
+        "(unless the instrument notes contain 'fidelity-override:').",
+    )
+    p.add_argument(
+        "--output-md",
+        default=None,
+        metavar="PATH",
+        help="Override the markdown output path (default: docs/reports/symbol-coverage.md).",
+    )
+    p.add_argument(
+        "--output-csv",
+        default=None,
+        metavar="PATH",
+        help="Override the CSV output path (default: data/reports/symbol-coverage.csv).",
+    )
+    p.add_argument("--database-url", default=None, metavar="URL")
+
     args = parser.parse_args()
     if args.command == "sync-registry":
         sys.exit(_cmd_sync_registry(args))
@@ -504,6 +588,8 @@ def main() -> None:
         sys.exit(_cmd_update(args))
     elif args.command == "status":
         sys.exit(_cmd_status(args))
+    elif args.command == "report":
+        sys.exit(_cmd_report(args))
     else:
         parser.print_help()
         sys.exit(1)
