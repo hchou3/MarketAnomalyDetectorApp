@@ -1,8 +1,7 @@
 """Record fixture responses for offline provider tests.
 
-Run this script once with live internet access to populate tests/fixtures/.
-The recorded files are committed to the repo so CI can run provider tests
-offline without hitting any external service.
+Downloads are written to data/recordings/ (git-ignored).  Copy the subset
+the tests actually need into tests/fixtures/ and commit only those files.
 
 Usage:
     uv run python scripts/record_fixtures.py               # all providers
@@ -35,7 +34,7 @@ from market_anomaly_detector.providers._http import http_get
 from market_anomaly_detector.registry import load_registry
 
 REPO_ROOT = Path(__file__).parent.parent
-FIXTURES = REPO_ROOT / "tests" / "fixtures"
+RECORDINGS = REPO_ROOT / "data" / "recordings"
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -105,7 +104,7 @@ def _measure_alfred_lag(series_id: str, api_key: str) -> dict:
 
 
 def record_fred(api_key: str | None) -> None:
-    out_dir = FIXTURES / "fred"
+    out_dir = RECORDINGS / "fred"
     out_dir.mkdir(parents=True, exist_ok=True)
 
     symbols = _collect_symbols("fred")
@@ -151,7 +150,7 @@ def record_fred(api_key: str | None) -> None:
 
 
 def record_cboe() -> None:
-    out_dir = FIXTURES / "cboe"
+    out_dir = RECORDINGS / "cboe"
     out_dir.mkdir(parents=True, exist_ok=True)
 
     symbols = _collect_symbols("cboe")
@@ -183,7 +182,7 @@ def record_cboe() -> None:
 def record_yahoo() -> None:
     import yfinance as yf
 
-    out_dir = FIXTURES / "yahoo"
+    out_dir = RECORDINGS / "yahoo"
     out_dir.mkdir(parents=True, exist_ok=True)
 
     instruments = load_registry()
@@ -241,7 +240,8 @@ def main() -> None:
         elif p == "yahoo":
             record_yahoo()
 
-    print("\nDone. Commit the new/updated files under tests/fixtures/.")
+    print(f"\nDone. Downloads are in {RECORDINGS}/ (git-ignored).")
+    print("Copy the subset the tests need into tests/fixtures/ and commit only those.")
 
 
 if __name__ == "__main__":
