@@ -221,22 +221,20 @@ def _nan_series(idx: pd.DatetimeIndex) -> pd.Series:
 
 
 def _stale_tolerance(df: pd.DataFrame) -> pd.Timedelta:
-    """Infer carry-forward tolerance from the data's frequency and publication lag.
+    """Infer carry-forward tolerance from the data's native observation frequency.
 
-    Frequency bucket → buffer: daily (min gap ≤ 2d) → 7d, weekly (≤ 10d) → 14d,
-    monthly → 45d.  The median publication lag is added to the buffer.
+    Frequency bucket → tolerance: daily (min gap ≤ 2d) → 7d, weekly (≤ 10d) → 14d,
+    monthly → 45d.  The merge is already on known_at, which encodes the
+    publication lag, so lag must not be added to the tolerance again.
     """
     if df is None or df.empty:
         return pd.Timedelta(days=45)
-    ka = pd.to_datetime(df["known_at"])
-    obs = pd.to_datetime(df["obs_date"])
-    lag_days = max(0, int(round((ka - obs).dt.days.median())))
-    obs_sorted = obs.sort_values()
+    obs_sorted = pd.to_datetime(df["obs_date"]).sort_values()
     gaps = obs_sorted.diff().dt.days.dropna()
     pos = gaps[gaps > 0]
     min_gap = int(pos.min()) if len(pos) > 0 else 1
     buffer = 7 if min_gap <= 2 else (14 if min_gap <= 10 else 45)
-    return pd.Timedelta(days=lag_days + buffer)
+    return pd.Timedelta(days=buffer)
 
 
 def _weekly_series(df: pd.DataFrame, tues_idx: pd.DatetimeIndex) -> pd.Series:
@@ -290,8 +288,9 @@ def _rvol(df: pd.DataFrame | None, tues_idx: pd.DatetimeIndex, window_days: int)
     """Annualised realised vol of daily log returns, sampled at each Tuesday.
 
     Respects known_at: for each Tuesday t, only prices with known_at <= t
-    contribute.  Prices are indexed by obs_date for the rolling std, then
-    re-stamped by known_at before the final merge_asof.
+    contribute.  Log returns are computed between consecutive actual
+    observations only (no calendar filling); each return is stamped with
+    the later observation's known_at.
     """
     if df is None or (isinstance(df, pd.DataFrame) and df.empty):
         return _nan_series(tues_idx)
@@ -300,33 +299,32 @@ def _rvol(df: pd.DataFrame | None, tues_idx: pd.DatetimeIndex, window_days: int)
     work["_obs_dt"] = pd.to_datetime(work["obs_date"])
     work["_ka_dt"] = pd.to_datetime(work["known_at"])
     # Dedup: if multiple rows share obs_date, keep the one with the latest known_at
-    work = work.sort_values(["_obs_dt", "_ka_dt"]).groupby("_obs_dt", as_index=False).last()
-
-    # Business-day price series indexed by obs_date; short holiday gaps filled
-    price_s = (
-        pd.Series(work["value"].astype(float).values, index=work["_obs_dt"])
-        .sort_index()
-        .resample("B")
+    work = (
+        work.sort_values(["_obs_dt", "_ka_dt"])
+        .groupby("_obs_dt", as_index=False)
         .last()
-        .ffill(limit=5)
+        .sort_values("_obs_dt")
+        .reset_index(drop=True)
     )
 
-    # Rolling realized vol indexed by obs_date
-    log_ret = np.log(price_s / price_s.shift(1))
-    rv_by_obs = log_ret.rolling(
+    # Log returns between consecutive actual observations (no calendar filling).
+    # rv_series.iloc[i] uses work["_ka_dt"].iloc[i] as its publication date.
+    log_ret = np.log(work["value"].astype(float)).diff()
+    rv_series = log_ret.rolling(
         window_days, min_periods=max(1, window_days // 2)
     ).std() * math.sqrt(252)
 
-    # For each obs_date with a valid rvol, find its publication date (known_at).
-    # Forward-filled dates (from resample/ffill) inherit the last actual known_at.
-    rv_df = rv_by_obs.dropna().reset_index()
-    rv_df.columns = pd.Index(["_obs_dt", "_rv"])
-    rv_with_ka = pd.merge_asof(
-        rv_df,
-        work[["_obs_dt", "_ka_dt"]],
-        on="_obs_dt",
-        direction="backward",
-    ).sort_values(["_ka_dt", "_obs_dt"])
+    rv_with_ka = (
+        pd.DataFrame(
+            {
+                "_obs_dt": work["_obs_dt"].values,
+                "_ka_dt": work["_ka_dt"].values,
+                "_rv": rv_series.values,
+            }
+        )
+        .dropna(subset=["_rv"])
+        .sort_values(["_ka_dt", "_obs_dt"])
+    )
 
     # Sample at each Tuesday: latest rvol where known_at <= tuesday
     tues_df = pd.DataFrame({"_tdt": tues_idx})

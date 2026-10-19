@@ -96,11 +96,13 @@ def test_weekly_series_publication_lag_hides_unreleased_value():
     tues_idx = pd.DatetimeIndex([pd.Timestamp(t) for t in tuesdays])
     s = _weekly_series(df, tues_idx)
 
-    # On t0 (2020-01-07): known_at for 2020-01-07 row is 2020-01-18 > t0 → not visible
-    # Only 2020-01-06 (known_at = 2020-01-06) is available
+    # On t0 (2020-01-07): known_at for 2020-01-07 row is 2020-01-18 > t0 → not visible.
+    # Only 2020-01-06 (known_at = 2020-01-06) is available; gap = 1 day ≤ 7d daily tolerance.
     assert s[pd.Timestamp(t0)] == pytest.approx(9.0)
-    # On t1 (2020-01-14): still not visible (known_at = 2020-01-18 > t1)
-    assert s[pd.Timestamp(t1)] == pytest.approx(9.0)
+    # On t1 (2020-01-14): the Jan 7 obs is still hidden (known_at = 2020-01-18 > t1).
+    # The Jan 6 obs (known_at = 2020-01-06) is 8 days stale by Jan 14, exceeding the
+    # 7-day daily tolerance, so the result is NaN rather than a stale carry-forward.
+    assert math.isnan(s[pd.Timestamp(t1)])
 
 
 def test_weekly_series_publication_lag_reveals_value_when_known():
@@ -621,6 +623,38 @@ def test_spec_v1_build_runs_on_synthetic_data():
 # ── Point-in-time correctness: rvol known_at ─────────────────────────────────
 
 
+def test_rvol_holiday_no_look_ahead():
+    """rvol at a Tuesday equals rvol from masked data when the next day is a holiday.
+
+    With calendar-filling (resample+ffill) the holiday Wednesday gets the Tuesday
+    price, producing a zero log-return that's stamped known_at=Tuesday.  The full
+    series samples this Wednesday entry (higher obs_date, same known_at) while the
+    masked series stops at Tuesday, giving different values.  With actual-observations-
+    only, both full and masked data produce the same result.
+    """
+    # ~32 business days of history through Tue Jan 14; Wed Jan 15 is the holiday;
+    # Thu Jan 16 appears only in the full series.
+    all_bdays = [d.date() for d in pd.bdate_range(date(2019, 12, 1), date(2020, 1, 16))]
+    obs_dates = [d for d in all_bdays if d != date(2020, 1, 15)]  # drop the holiday
+
+    rng = np.random.default_rng(42)
+    prices = np.cumprod(1 + rng.normal(0, 0.01, len(obs_dates))) * 100.0
+    df = pd.DataFrame({"obs_date": obs_dates, "value": prices.tolist(), "known_at": obs_dates})
+
+    target_tuesday = date(2020, 1, 14)
+    tues_idx = pd.DatetimeIndex([pd.Timestamp(target_tuesday)])
+
+    rv_full = _rvol(df, tues_idx, 20)
+
+    masked = df[df["known_at"] <= target_tuesday].copy()
+    rv_masked = _rvol(masked, tues_idx, 20)
+
+    vf = rv_full.iloc[0]
+    vm = rv_masked.iloc[0]
+    assert not math.isnan(vf), "Expected a valid rvol at the target Tuesday"
+    assert vm == pytest.approx(vf, rel=1e-9), f"Holiday look-ahead: full={vf}, masked={vm}"
+
+
 def test_rvol_respects_known_at_lag():
     """rvol with publication_lag_days=10 equals rvol from data truncated to known_at <= t."""
     n_days = 200
@@ -658,6 +692,22 @@ def test_rvol_respects_known_at_lag():
 
 
 # ── Stale carry-forward ───────────────────────────────────────────────────────
+
+
+def test_weekly_series_monthly_gap_stale_after_45_days():
+    """A monthly series returns NaN for Tuesdays more than 45 days after last known_at."""
+    # Six monthly observations; no data after June 1
+    monthly_dates = [date(2020, m, 1) for m in range(1, 7)]
+    df = _price_df(monthly_dates, [100.0] * 6, lag_days=0)
+
+    # A Tuesday strictly beyond 45 days after Jun 1 (the last known_at)
+    beyond = date(2020, 6, 1) + timedelta(days=46)
+    while beyond.weekday() != 1:
+        beyond += timedelta(days=1)
+
+    tues_idx = pd.DatetimeIndex([pd.Timestamp(beyond)])
+    s = _weekly_series(df, tues_idx)
+    assert math.isnan(s.iloc[0])
 
 
 def test_weekly_series_gap_returns_nan():
