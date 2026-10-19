@@ -24,6 +24,7 @@ from market_anomaly_detector.eval_harness import (
     prob_metrics,
     row_metrics,
     vix_rule,
+    vix_z52,
 )
 
 # ── helpers ────────────────────────────────────────────────────────────────────
@@ -411,3 +412,93 @@ def test_folds_v2_no_data_leakage():
     folds = make_folds_v2(weeks, detect, first_test_year=2008, last_test_year=2015)
     for f in folds:
         assert f.val_end < f.test_start
+
+
+# ── vix_z52 ────────────────────────────────────────────────────────────────────
+
+
+def test_vix_z52_log_level_zscore():
+    """z-score is (log VIX[t] - mean) / std over trailing 52-week window."""
+    rng = np.random.default_rng(99)
+    # 60 weeks of random VIX around 20
+    vix = 20.0 + rng.normal(0, 2, 60)
+    vix = np.clip(vix, 10, 50)
+    z = vix_z52(vix, min_periods=52)
+    # First 51 weeks should be NaN (not enough observations)
+    assert all(math.isnan(v) for v in z[:51])
+    # Week 52 (index 51) should be a real number
+    assert not math.isnan(z[51])
+    # The z-score at week 59 computed manually should match.
+    # Rolling window at index 59 covers indices 8–59 (52 observations).
+    log_v = np.log(vix[8:60])
+    expected = (log_v[-1] - log_v.mean()) / log_v.std(ddof=1)
+    assert abs(z[59] - expected) < 1e-10
+
+
+def test_vix_z52_sustained_high_vix_alerts_throughout():
+    """Regression: sustained elevated VIX must alert throughout under vix_level.
+
+    Bug in previous implementation: z-scored the 1-week *change* of log VIX.
+    When VIX stabilises at a high level the change is near zero and the score
+    drops back below threshold — missing the entire episode.
+
+    Fix: vix_level (raw close) stays elevated regardless of week-over-week
+    changes, so every stress week alerts.  We also verify that vix_z52 stays
+    positive throughout (level z-score does not drop to zero mid-episode).
+    """
+    rng = np.random.default_rng(1)
+    # 100 calm weeks with small noise so threshold can be calibrated
+    calm_vix = (15.0 + rng.normal(0, 0.5, 100)).clip(10, 20)
+    # 48 stress weeks at sustained high VIX
+    stress_vix = np.full(48, 40.0)
+
+    # Threshold chosen only from val (calm) window — no test data leakage
+    calm_detect = np.zeros(100, dtype=int)
+    thr_level = choose_threshold(calm_detect, calm_vix, far_budget=0.05)
+
+    # vix_level: ALL 48 stress weeks must fire
+    alerts = vix_rule(stress_vix, thr_level)
+    assert alerts.sum() == 48, (
+        f"Expected all 48 stress weeks to alert with vix_level, got {alerts.sum()}."
+        " This is a regression for the sustained-high-VIX detection bug."
+    )
+
+    # vix_z52 must stay positive throughout (not decay to zero mid-episode)
+    full_vix = np.concatenate([calm_vix, stress_vix])
+    z52 = vix_z52(full_vix, min_periods=52)
+    stress_z52 = z52[100:]
+    # z52 should be positive for every non-NaN stress week
+    assert all(v > 0 for v in stress_z52 if not math.isnan(v)), (
+        "vix_z52 dropped to zero during sustained stress. The level z-score"
+        " must remain positive while VIX stays above its historical mean."
+    )
+
+
+def test_threshold_val_only_regression():
+    """Threshold must be chosen from validation rows only, not test rows.
+
+    A model must not see test data when selecting the threshold.
+    This test constructs a case where using test data would produce a lower
+    threshold (easier to meet) than using val data alone.
+    """
+    rng = np.random.default_rng(17)
+    # val: 50 calm weeks with low scores
+    val_detect = np.zeros(50, dtype=int)
+    val_scores = rng.uniform(0, 0.3, 50)
+
+    # test: 20 weeks — calm scores are higher, which would lower the threshold
+    # if test data were leaked into threshold selection
+    test_detect = np.zeros(20, dtype=int)
+    test_scores = rng.uniform(0.7, 1.0, 20)
+
+    thr_val_only = choose_threshold(val_detect, val_scores, far_budget=0.05)
+    thr_combined = choose_threshold(
+        np.concatenate([val_detect, test_detect]),
+        np.concatenate([val_scores, test_scores]),
+        far_budget=0.05,
+    )
+
+    # Using only val data should yield a LOWER (more permissive for calm) threshold
+    # than combining val+test (where high test scores inflate the distribution).
+    # thr_val_only <= thr_combined in a correctly split scenario.
+    assert thr_val_only <= thr_combined

@@ -35,9 +35,12 @@ choose_threshold(y_true, y_score, far_budget, excluded_mask) -> float
 Baselines
 ---------
 always_flag(n) -> np.ndarray
-persistence(detect_labels) -> np.ndarray
-vix_rule(vix_z_scores, threshold) -> np.ndarray
-fit_vix_threshold(vix_z_scores, detect_labels, far_budget, excluded_mask) -> float
+persistence(detect_labels) -> np.ndarray   [oracle reference — needs last week's label]
+vix_z52(vix_close, min_periods) -> np.ndarray
+    52-week rolling z-score of log VIX level.  Use with vix_rule + choose_threshold.
+vix_rule(scores, threshold) -> np.ndarray
+    Generic threshold rule: alert when score >= threshold.
+fit_vix_threshold(scores, detect_labels, far_budget, excluded_mask) -> float
 
 Folds
 -----
@@ -362,20 +365,47 @@ def persistence(detect_labels: np.ndarray | list) -> np.ndarray:
     return out
 
 
-def vix_rule(vix_z_scores: np.ndarray | list, threshold: float) -> np.ndarray:
-    """Alert when the VIX z-score meets or exceeds *threshold*."""
-    z = np.asarray(vix_z_scores, dtype=float)
+def vix_z52(
+    vix_close: np.ndarray | list,
+    min_periods: int = 52,
+) -> np.ndarray:
+    """52-week rolling z-score of log VIX level.
+
+    Score at week t = (log VIX[t] − mean(log VIX[t−51:t+1])) / std(...).
+    Uses a 52-week trailing window (ddof=1).  Returns NaN until *min_periods*
+    valid observations are available.
+
+    A sustained high-VIX episode produces a persistently elevated score because
+    the score is based on the *level* of log VIX, not the week-over-week change.
+    """
+    import pandas as pd
+
+    vc = np.asarray(vix_close, dtype=float)
+    log_vc = pd.Series(np.log(vc))
+    mu = log_vc.rolling(52, min_periods=min_periods).mean()
+    sigma = log_vc.rolling(52, min_periods=min_periods).std(ddof=1)
+    result = (log_vc - mu) / sigma
+    # When sigma==0 (constant series, sufficient data) set z=0 rather than NaN.
+    # Do NOT touch positions where sigma is NaN (insufficient warmup data).
+    constant_mask = (sigma == 0) & sigma.notna()
+    result = result.where(~constant_mask, other=0.0)
+    return result.to_numpy(dtype=float)
+
+
+def vix_rule(scores: np.ndarray | list, threshold: float) -> np.ndarray:
+    """Alert when *scores* meet or exceed *threshold* (generic threshold rule)."""
+    z = np.asarray(scores, dtype=float)
     return (z >= threshold).astype(int)
 
 
 def fit_vix_threshold(
-    vix_z_scores: np.ndarray,
+    scores: np.ndarray,
     detect_labels: np.ndarray,
     far_budget: float = 0.05,
     excluded_mask: np.ndarray | None = None,
 ) -> float:
-    """Choose the VIX threshold that achieves *far_budget* on the given window."""
-    return choose_threshold(detect_labels, vix_z_scores, far_budget, excluded_mask)
+    """Choose the threshold for *scores* that achieves *far_budget* on the given window."""
+    return choose_threshold(detect_labels, scores, far_budget, excluded_mask)
 
 
 # ── Fold construction ─────────────────────────────────────────────────────────
