@@ -143,8 +143,6 @@ def _write_report(
 
 # ── baselines ─────────────────────────────────────────────────────────────────
 
-_DEFAULT_CSV = Path(__file__).parent.parent.parent / "data" / "raw" / "ews_weekly_2000_2021.csv"
-
 
 def _cmd_baselines(args: argparse.Namespace) -> int:
     import math
@@ -152,51 +150,54 @@ def _cmd_baselines(args: argparse.Namespace) -> int:
 
     import numpy as np
     import pandas as pd
+    from sqlalchemy.orm import Session
 
+    from .db.engine import create_engine
     from .episodes import extract_episodes
     from .eval_harness import (
         KNOWN_UNLABELED,
+        choose_threshold,
         detect_event_results,
         false_alarm_runs,
-        fit_vix_threshold,
         make_folds_v2,
         persistence,
         predict_event_results,
         row_metrics,
         vix_rule,
+        vix_z52,
     )
-    from .labels import build_targets
+    from .features.build import weekly_close
+    from .labels import build_targets, load_labels
 
-    csv_path = Path(args.csv)
-    if not csv_path.exists():
-        print(f"ERROR: CSV not found: {csv_path}", file=sys.stderr)
+    # ── Load from DB ──────────────────────────────────────────────────────────
+    try:
+        engine = create_engine(url=args.database_url)
+        with Session(engine) as session:
+            _require_db_ready(engine)
+            labels_df = load_labels(session, label_set=args.label_set)
+            if labels_df.empty:
+                print(f"ERROR: no labels for {args.label_set!r}", file=sys.stderr)
+                return 1
+            tuesdays = list(labels_df["week"])
+            vix_close_arr = weekly_close(session, "vix", tuesdays)
+    except SystemExit:
+        raise
+    except Exception as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
         return 1
 
-    df = pd.read_csv(csv_path, parse_dates=["Data"])
-    df = df.sort_values("Data").reset_index(drop=True)
-    weeks: list[date] = [d.date() for d in df["Data"]]
-    detect = df["Y"].values.astype(int)
+    weeks = tuesdays
+    detect = labels_df["value"].values.astype(int)
+    vix_level_scores = vix_close_arr
+    vix_z52_scores = vix_z52(vix_close_arr)
 
-    # VIX 156-week z-score of 1-week log return
-    log_vix = np.log(df["VIX"].values)
-    vix_lr = np.empty_like(log_vix)
-    vix_lr[0] = np.nan
-    vix_lr[1:] = np.diff(log_vix)
-    vix_z = np.full(len(vix_lr), np.nan)
-    for i in range(len(vix_lr)):
-        w = vix_lr[max(0, i - 155) : i + 1]
-        w = w[~np.isnan(w)]
-        if len(w) >= 104 and not np.isnan(vix_lr[i]):
-            std = w.std(ddof=1)
-            vix_z[i] = (vix_lr[i] - w.mean()) / std if std > 0 else 0.0
-
-    labels_df = pd.DataFrame({"week": weeks, "value": detect})
-    targets = build_targets(labels_df, horizon=args.horizon)
+    labels_for_targets = pd.DataFrame({"week": weeks, "value": detect})
+    targets = build_targets(labels_for_targets, horizon=args.horizon)
     predict_labels = targets["predict"].values
 
-    ep2 = extract_episodes(labels_df, merge_gap=2)
-    ep0 = extract_episodes(labels_df, merge_gap=0)
-    ep4 = extract_episodes(labels_df, merge_gap=4)
+    ep2 = extract_episodes(labels_for_targets, merge_gap=2)
+    ep0 = extract_episodes(labels_for_targets, merge_gap=0)
+    ep4 = extract_episodes(labels_for_targets, merge_gap=4)
 
     ku_mask = np.zeros(len(weeks), dtype=bool)
     for ks, ke, _ in KNOWN_UNLABELED:
@@ -211,23 +212,35 @@ def _cmd_baselines(args: argparse.Namespace) -> int:
         last_test_year=args.last_test_year,
     )
 
+    # ── Walk-forward evaluation ───────────────────────────────────────────────
     rows_detect: list[dict] = []
     rows_predict: list[dict] = []
     for fold in folds:
-        val_vix_z = vix_z[fold.val_lo : fold.test_lo]
         val_detect = detect[fold.val_lo : fold.test_lo]
         val_ku = ku_mask[fold.val_lo : fold.test_lo]
-        thr = fit_vix_threshold(
-            val_vix_z, val_detect, far_budget=args.far_budget, excluded_mask=val_ku
+
+        thr_level = choose_threshold(
+            val_detect,
+            vix_level_scores[fold.val_lo : fold.test_lo],
+            far_budget=args.far_budget,
+            excluded_mask=val_ku,
+        )
+        thr_z52 = choose_threshold(
+            val_detect,
+            vix_z52_scores[fold.val_lo : fold.test_lo],
+            far_budget=args.far_budget,
+            excluded_mask=val_ku,
         )
 
         t_detect = detect[fold.test_lo : fold.test_hi]
-        t_vix_z = vix_z[fold.test_lo : fold.test_hi]
+        t_vix_level = vix_level_scores[fold.test_lo : fold.test_hi]
+        t_vix_z52 = vix_z52_scores[fold.test_lo : fold.test_hi]
         t_pred = predict_labels[fold.test_lo : fold.test_hi]
         t_weeks = weeks[fold.test_lo : fold.test_hi]
 
         per = persistence(t_detect)
-        vr = vix_rule(t_vix_z, thr)
+        vrl = vix_rule(t_vix_level, thr_level)
+        vrz = vix_rule(t_vix_z52, thr_z52)
 
         for k, (wk, dl, pl) in enumerate(zip(t_weeks, t_detect, t_pred)):
             rows_detect.append(
@@ -236,7 +249,9 @@ def _cmd_baselines(args: argparse.Namespace) -> int:
                     "detect": int(dl),
                     "always": 1,
                     "persist": int(per[k]),
-                    "vix": int(vr[k]),
+                    "vix_level": int(vrl[k]),
+                    "vix_z52": int(vrz[k]),
+                    "vix_close": float(t_vix_level[k]),
                     "fold": fold.test_year,
                 }
             )
@@ -248,7 +263,8 @@ def _cmd_baselines(args: argparse.Namespace) -> int:
                         "detect": int(dl),
                         "always": 1,
                         "persist": int(per[k]),
-                        "vix": int(vr[k]),
+                        "vix_level": int(vrl[k]),
+                        "vix_z52": int(vrz[k]),
                         "fold": fold.test_year,
                     }
                 )
@@ -258,14 +274,17 @@ def _cmd_baselines(args: argparse.Namespace) -> int:
     calm_pred_df = pred_df[pred_df["detect"] == 0].copy()
     calm_at_t_pos = int((calm_pred_df["predict"] == 1).sum())
 
-    baselines = ["always", "persist", "vix"]
+    all_baselines = ["always", "persist", "vix_level", "vix_z52"]
     bnames = {
         "always": "Always-flag",
-        "persist": "Persistence (prev-week label)",
-        "vix": "VIX z-score rule",
+        "persist": "Persistence (oracle ref.)",
+        "vix_level": "VIX level",
+        "vix_z52": "VIX z52 (log level)",
     }
-    detect_metrics = {b: row_metrics(det_df["detect"], det_df[b]) for b in baselines}
-    predict_metrics = {b: row_metrics(calm_pred_df["predict"], calm_pred_df[b]) for b in baselines}
+    detect_metrics = {b: row_metrics(det_df["detect"], det_df[b]) for b in all_baselines}
+    predict_metrics = {
+        b: row_metrics(calm_pred_df["predict"], calm_pred_df[b]) for b in all_baselines
+    }
 
     first_test = args.first_test_year
     last_test = args.last_test_year or max(w.year for w in weeks)
@@ -276,32 +295,45 @@ def _cmd_baselines(args: argparse.Namespace) -> int:
     ep0_dev = [e for e in ep0 if dev_start <= e.start <= dev_end]
     ep4_dev = [e for e in ep4 if dev_start <= e.start <= dev_end]
 
-    alert_set = set(det_df[det_df["vix"] == 1]["week"])
+    alert_level = set(det_df[det_df["vix_level"] == 1]["week"])
+    alert_z52 = set(det_df[det_df["vix_z52"] == 1]["week"])
     persist_set = set(det_df[det_df["persist"] == 1]["week"])
+    always_set = set(det_df["week"])
 
-    ep_res_vix2 = detect_event_results(ep2_dev, alert_set)
+    ep_res_level2 = detect_event_results(ep2_dev, alert_level)
+    ep_res_z52_2 = detect_event_results(ep2_dev, alert_z52)
     ep_res_pers2 = detect_event_results(ep2_dev, persist_set)
-    ep_res_af2 = detect_event_results(ep2_dev, set(det_df["week"]))
-    ep_res_vix0 = detect_event_results(ep0_dev, alert_set)
-    ep_res_vix4 = detect_event_results(ep4_dev, alert_set)
+    ep_res_af2 = detect_event_results(ep2_dev, always_set)
+    ep_res_level0 = detect_event_results(ep0_dev, alert_level)
+    ep_res_level4 = detect_event_results(ep4_dev, alert_level)
+    ep_res_z52_0 = detect_event_results(ep0_dev, alert_z52)
+    ep_res_z52_4 = detect_event_results(ep4_dev, alert_z52)
 
-    hit_vix2 = sum(r.hit for r in ep_res_vix2)
+    hit_level2 = sum(r.hit for r in ep_res_level2)
+    hit_z52_2 = sum(r.hit for r in ep_res_z52_2)
     hit_pers2 = sum(r.hit for r in ep_res_pers2)
     hit_af2 = sum(r.hit for r in ep_res_af2)
-    hit_vix0 = sum(r.hit for r in ep_res_vix0)
-    hit_vix4 = sum(r.hit for r in ep_res_vix4)
 
-    calm_set_vix = set(det_df[(det_df["vix"] == 1) & (det_df["detect"] == 0)]["week"])
-    calm_set_pers = set(det_df[(det_df["persist"] == 1) & (det_df["detect"] == 0)]["week"])
-    calm_set_always = set(det_df[det_df["detect"] == 0]["week"])
+    calm_level = set(det_df[(det_df["vix_level"] == 1) & (det_df["detect"] == 0)]["week"])
+    calm_z52 = set(det_df[(det_df["vix_z52"] == 1) & (det_df["detect"] == 0)]["week"])
+    calm_pers = set(det_df[(det_df["persist"] == 1) & (det_df["detect"] == 0)]["week"])
+    calm_always = set(det_df[det_df["detect"] == 0]["week"])
 
-    pred_res_vix = predict_event_results(ep2_dev, calm_set_vix, horizon=args.horizon)
-    pred_res_pers = predict_event_results(ep2_dev, calm_set_pers, horizon=args.horizon)
-    pred_res_af = predict_event_results(ep2_dev, calm_set_always, horizon=args.horizon)
+    pred_res_level = predict_event_results(ep2_dev, calm_level, horizon=args.horizon)
+    pred_res_z52 = predict_event_results(ep2_dev, calm_z52, horizon=args.horizon)
+    pred_res_pers = predict_event_results(ep2_dev, calm_pers, horizon=args.horizon)
+    pred_res_af = predict_event_results(ep2_dev, calm_always, horizon=args.horizon)
 
     dev_weeks = [w for w in weeks if dev_start <= w <= dev_end]
-    fa_vix = false_alarm_runs(
-        sorted(alert_set & set(dev_weeks)),
+    fa_level = false_alarm_runs(
+        sorted(alert_level & set(dev_weeks)),
+        dev_weeks,
+        ep2_dev,
+        grace_weeks=2,
+        known_unlabeled=KNOWN_UNLABELED,
+    )
+    fa_z52 = false_alarm_runs(
+        sorted(alert_z52 & set(dev_weeks)),
         dev_weeks,
         ep2_dev,
         grace_weeks=2,
@@ -315,7 +347,8 @@ def _cmd_baselines(args: argparse.Namespace) -> int:
         known_unlabeled=KNOWN_UNLABELED,
     )
 
-    fa_vix_real = [r for r in fa_vix if not r.in_known_unlabeled]
+    fa_level_real = [r for r in fa_level if not r.in_known_unlabeled]
+    fa_z52_real = [r for r in fa_z52 if not r.in_known_unlabeled]
     fa_pers_real = [r for r in fa_pers if not r.in_known_unlabeled]
 
     ep2_dev_years: set[int] = set()
@@ -325,20 +358,42 @@ def _cmd_baselines(args: argparse.Namespace) -> int:
             ep2_dev_years.add(d2.year)
             d2 += timedelta(weeks=1)
     calm_dev_years = [y for y in range(first_test, last_test + 1) if y not in ep2_dev_years]
-    fa_vix_calm = [r for r in fa_vix_real if r.year in calm_dev_years]
-    fa_pers_calm = [r for r in fa_pers_real if r.year in calm_dev_years]
+    fa_level_calm = [r for r in fa_level_real if r.year in calm_dev_years]
+    fa_z52_calm = [r for r in fa_z52_real if r.year in calm_dev_years]
+
+    # Episode VIX stats for the "catchable" analysis
+    vix_by_week = {w: v for w, v in zip(weeks, vix_level_scores)}
+    ep_vix_stats: list[dict] = []
+    for ep in ep2_dev:
+        closes: list[float] = []
+        d3 = ep.start
+        while d3 <= ep.end:
+            v = vix_by_week.get(d3, float("nan"))
+            if not math.isnan(v):
+                closes.append(v)
+            d3 += timedelta(weeks=1)
+        ep_vix_stats.append(
+            {
+                "ep": ep,
+                "median": float(np.median(closes)) if closes else float("nan"),
+                "max": float(np.max(closes)) if closes else float("nan"),
+            }
+        )
 
     def pct(n: int, d: int) -> str:
         return f"{n}/{d} ({100 * n // d}%)" if d else "0/0"
 
+    # ── Write report ──────────────────────────────────────────────────────────
     today_str = date.today().isoformat()
     out: list[str] = []
-    out.append(f"# Baselines Report — ews_v1 Development Folds ({first_test}–{last_test})")
+    out.append(
+        f"# Baselines Report — {args.label_set} Development Folds ({first_test}–{last_test})"
+    )
     out.append("")
     out.append(f"Generated: {today_str}  ")
-    out.append(f"Data source: `{csv_path.name}`  ")
+    out.append("VIX source: feature pipeline / DB (Yahoo `^VIX`, known\\_at-correct)  ")
     out.append(
-        f"Label set: `ews_v1` · Horizon h = {args.horizon}"
+        f"Label set: `{args.label_set}` · Horizon h = {args.horizon}"
         f" · Merge gap = 2 · FAR budget = {args.far_budget:.0%}  "
     )
     out.append(
@@ -349,6 +404,10 @@ def _cmd_baselines(args: argparse.Namespace) -> int:
     out.append("> **Note:** The 2018–2021 confirmation window contains only 6 episodes")
     out.append("> (2018-10, 2018-12, 2020-02, 2020-06, 2020-08, 2020-10) and will be run")
     out.append("> once at the end of Phase 2 Step 5. These results are development-only.")
+    out.append("")
+    out.append("> **Persistence** is an oracle reference baseline: it requires last week's")
+    out.append("> label, which is not available at live scoring time. It is reported for")
+    out.append("> context but excluded from the model target bar.")
     out.append("")
     out.append("---")
     out.append("")
@@ -370,10 +429,11 @@ def _cmd_baselines(args: argparse.Namespace) -> int:
     out.append("")
     out.append("| Baseline | Prec | Recall | F1 | FAR | TP | FP | FN |")
     out.append("|----------|------|--------|-----|-----|----|----|-----|")
-    for b in baselines:
+    for b in all_baselines:
         m = detect_metrics[b]
+        suffix = " *(oracle)*" if b == "persist" else ""
         out.append(
-            f"| {bnames[b]} | {m['precision']:.3f} | {m['recall']:.3f}"
+            f"| {bnames[b]}{suffix} | {m['precision']:.3f} | {m['recall']:.3f}"
             f" | {m['f1']:.3f} | {m['false_alarm_rate']:.3f}"
             f" | {m['tp']} | {m['fp']} | {m['fn']} |"
         )
@@ -382,30 +442,77 @@ def _cmd_baselines(args: argparse.Namespace) -> int:
     out.append("")
     out.append("## Event-level metrics — detect head")
     out.append("")
-    out.append("### Per-episode hit/miss/lead-time (merge\\_gap = 2, VIX rule)")
+    out.append("### Per-episode hit/miss/lead-time (merge\\_gap = 2)")
     out.append("")
-    out.append("| # | Start | End | Weeks | VIX hit | VIX weeks-in | Persist hit | Always hit |")
-    out.append("|---|-------|-----|-------|---------|--------------|-------------|------------|")
-    for i, (rv, rp, ra) in enumerate(zip(ep_res_vix2, ep_res_pers2, ep_res_af2), 1):
-        ep = rv.episode
+    out.append(
+        "| # | Start | End | Wks"
+        " | Level hit | Level w-in | z52 hit | z52 w-in | Persist† | Always |"
+    )
+    out.append(
+        "|---|-------|-----|-----|-----------|-----------|---------|---------|---------|--------|"
+    )
+    for i, (rl, rz, rp, ra) in enumerate(
+        zip(ep_res_level2, ep_res_z52_2, ep_res_pers2, ep_res_af2), 1
+    ):
+        ep = rl.episode
         out.append(
             f"| {i} | {ep.start} | {ep.end} | {ep.length}"
-            f" | {'Y' if rv.hit else 'N'} | {rv.weeks_into_episode if rv.hit else '-'}"
+            f" | {'Y' if rl.hit else 'N'} | {rl.weeks_into_episode if rl.hit else '-'}"
+            f" | {'Y' if rz.hit else 'N'} | {rz.weeks_into_episode if rz.hit else '-'}"
             f" | {'Y' if rp.hit else 'N'} | {'Y' if ra.hit else 'N'} |"
         )
     out.append("")
+    out.append("† Persistence is an oracle reference (last week's label).")
+    out.append("")
     out.append(
-        f"**Event recall (merge\\_gap=2):** VIX {pct(hit_vix2, len(ep2_dev))},"
-        f" Persistence {pct(hit_pers2, len(ep2_dev))},"
+        f"**Event recall (merge\\_gap=2):**"
+        f" VIX level {pct(hit_level2, len(ep2_dev))},"
+        f" VIX z52 {pct(hit_z52_2, len(ep2_dev))},"
+        f" Persistence† {pct(hit_pers2, len(ep2_dev))},"
         f" Always-flag {pct(hit_af2, len(ep2_dev))}"
     )
     out.append("")
-    out.append("### Sensitivity to merge gap (VIX rule, detect head)")
+    out.append("### Sensitivity to merge gap")
     out.append("")
-    out.append("| Merge gap | Episodes | VIX hits | Recall |")
-    out.append("|-----------|----------|----------|--------|")
-    for mg, eps, hits in [(0, ep0_dev, hit_vix0), (2, ep2_dev, hit_vix2), (4, ep4_dev, hit_vix4)]:
-        out.append(f"| {mg} | {len(eps)} | {hits} | {hits / len(eps):.3f} |")
+    out.append("| Merge gap | Episodes | Level hits | Level recall | z52 hits | z52 recall |")
+    out.append("|-----------|----------|-----------|--------------|---------|-----------|")
+    for mg, eps, rls, rzs in [
+        (0, ep0_dev, ep_res_level0, ep_res_z52_0),
+        (2, ep2_dev, ep_res_level2, ep_res_z52_2),
+        (4, ep4_dev, ep_res_level4, ep_res_z52_4),
+    ]:
+        hl = sum(r.hit for r in rls)
+        hz = sum(r.hit for r in rzs)
+        out.append(
+            f"| {mg} | {len(eps)} | {hl} | {hl / len(eps):.3f} | {hz} | {hz / len(eps):.3f} |"
+        )
+    out.append("")
+    out.append("---")
+    out.append("")
+    out.append("## VIX level inside dev episodes")
+    out.append("")
+    out.append(
+        "Episodes with median VIX < 20 cannot be caught by any VIX threshold rule "
+        "(marked **low-VIX**)."
+    )
+    out.append("")
+    out.append("| # | Start | End | Wks | VIX median | VIX max | Catchable |")
+    out.append("|---|-------|-----|-----|-----------|---------|-----------|")
+    for i, s in enumerate(ep_vix_stats, 1):
+        ep = s["ep"]
+        med = s["median"]
+        mx = s["max"]
+        catchable = "N — low-VIX" if (not math.isnan(med) and med < 20) else "Y"
+        med_str = f"{med:.1f}" if not math.isnan(med) else "—"
+        mx_str = f"{mx:.1f}" if not math.isnan(mx) else "—"
+        out.append(
+            f"| {i} | {ep.start} | {ep.end} | {ep.length} | {med_str} | {mx_str} | {catchable} |"
+        )
+    low_vix_count = sum(1 for s in ep_vix_stats if not math.isnan(s["median"]) and s["median"] < 20)
+    out.append(
+        f"\n{low_vix_count} of {len(ep2_dev)} dev episodes have median VIX < 20;"
+        " no level threshold can catch them."
+    )
     out.append("")
     out.append("---")
     out.append("")
@@ -420,29 +527,41 @@ def _cmd_baselines(args: argparse.Namespace) -> int:
     out.append("")
     out.append("| Baseline | Prec | Recall | F1 | FAR |")
     out.append("|----------|------|--------|-----|-----|")
-    for b in baselines:
+    for b in all_baselines:
         m = predict_metrics[b]
+        suffix = " *(oracle)*" if b == "persist" else ""
         out.append(
-            f"| {bnames[b]} | {m['precision']:.3f} | {m['recall']:.3f}"
+            f"| {bnames[b]}{suffix} | {m['precision']:.3f} | {m['recall']:.3f}"
             f" | {m['f1']:.3f} | {m['false_alarm_rate']:.3f} |"
         )
     out.append("")
-    out.append("### Event-level advance warning (VIX rule, calm-at-t alerts, h=4)")
+    out.append("### Event-level advance warning (calm-at-t alerts, h=4)")
     out.append("")
-    hit_pv = sum(r.hit for r in pred_res_vix)
+    hit_pl = sum(r.hit for r in pred_res_level)
+    hit_pz = sum(r.hit for r in pred_res_z52)
     hit_pp = sum(r.hit for r in pred_res_pers)
     hit_paf = sum(r.hit for r in pred_res_af)
-    out.append(f"VIX rule: {pct(hit_pv, len(ep2_dev))} episodes warned  ")
-    out.append(f"Persistence: {pct(hit_pp, len(ep2_dev))} episodes warned  ")
+    out.append(f"VIX level: {pct(hit_pl, len(ep2_dev))} episodes warned  ")
+    out.append(f"VIX z52: {pct(hit_pz, len(ep2_dev))} episodes warned  ")
+    out.append(f"Persistence†: {pct(hit_pp, len(ep2_dev))} episodes warned  ")
     out.append(f"Always-flag (calm): {pct(hit_paf, len(ep2_dev))} episodes warned")
     out.append("")
-    out.append("| # | Episode start | VIX warned | VIX lead (w) | Persist warned | Always warned |")
-    out.append("|---|--------------|------------|--------------|----------------|---------------|")
-    for i, (rv, rp, ra) in enumerate(zip(pred_res_vix, pred_res_pers, pred_res_af), 1):
-        ep = rv.episode
+    out.append(
+        "| # | Ep start | Level warned | Level lead (w)"
+        " | z52 warned | z52 lead (w) | Persist† | Always |"
+    )
+    out.append(
+        "|---|----------|-------------|----------------"
+        "|-----------|-------------|---------|--------|"
+    )
+    for i, (rl, rz, rp, ra) in enumerate(
+        zip(pred_res_level, pred_res_z52, pred_res_pers, pred_res_af), 1
+    ):
+        ep = rl.episode
         out.append(
-            f"| {i} | {ep.start} | {'Y' if rv.hit else 'N'}"
-            f" | {rv.weeks_into_episode if rv.hit else '-'}"
+            f"| {i} | {ep.start}"
+            f" | {'Y' if rl.hit else 'N'} | {rl.weeks_into_episode if rl.hit else '-'}"
+            f" | {'Y' if rz.hit else 'N'} | {rz.weeks_into_episode if rz.hit else '-'}"
             f" | {'Y' if rp.hit else 'N'} | {'Y' if ra.hit else 'N'} |"
         )
     out.append("")
@@ -455,12 +574,14 @@ def _cmd_baselines(args: argparse.Namespace) -> int:
     )
     out.append(f"Calm dev years (no labeled episode): {calm_dev_years}")
     out.append("")
-    out.append("| Baseline | Total FA runs | FA in calm years | FA runs in known-unlabeled |")
-    out.append("|----------|--------------|-----------------|---------------------------|")
-    ku_vix = sum(1 for r in fa_vix if r.in_known_unlabeled)
+    out.append("| Baseline | Total FA runs | FA in calm years | FA in known-unlabeled |")
+    out.append("|----------|--------------|-----------------|----------------------|")
+    ku_level = sum(1 for r in fa_level if r.in_known_unlabeled)
+    ku_z52 = sum(1 for r in fa_z52 if r.in_known_unlabeled)
     ku_pers = sum(1 for r in fa_pers if r.in_known_unlabeled)
-    out.append(f"| VIX rule | {len(fa_vix_real)} | {len(fa_vix_calm)} | {ku_vix} |")
-    out.append(f"| Persistence | {len(fa_pers_real)} | {len(fa_pers_calm)} | {ku_pers} |")
+    out.append(f"| VIX level | {len(fa_level_real)} | {len(fa_level_calm)} | {ku_level} |")
+    out.append(f"| VIX z52 | {len(fa_z52_real)} | {len(fa_z52_calm)} | {ku_z52} |")
+    out.append(f"| Persistence† | {len(fa_pers_real)} | — | {ku_pers} |")
     out.append("| Always-flag | — | — | — (all weeks flagged) |")
     out.append("")
     out.append("---")
@@ -469,36 +590,47 @@ def _cmd_baselines(args: argparse.Namespace) -> int:
     out.append("")
     out.append("Alerts in these windows are reported below but excluded from false-alarm counts.")
     out.append("")
-    out.append("| Event | Window | VIX alerts | Persist alerts |")
-    out.append("|-------|--------|------------|----------------|")
+    out.append("| Event | Window | Level alerts | z52 alerts |")
+    out.append("|-------|--------|-------------|------------|")
     for ks, ke, kname in KNOWN_UNLABELED:
-        vix_c = sum(1 for w in weeks if ks <= w <= ke and w in alert_set)
-        pers_c = sum(1 for w in weeks if ks <= w <= ke and w in persist_set)
-        out.append(f"| {kname} | {ks} – {ke} | {vix_c} | {pers_c} |")
+        lc = sum(1 for w in weeks if ks <= w <= ke and w in alert_level)
+        zc = sum(1 for w in weeks if ks <= w <= ke and w in alert_z52)
+        out.append(f"| {kname} | {ks} – {ke} | {lc} | {zc} |")
     out.append("")
     out.append("---")
     out.append("")
     out.append("## Baselines to beat")
     out.append("")
-    out.append("A candidate model must exceed these bars on the development folds:")
-    out.append("")
     out.append(
-        f"- **Event recall (detect, mg=2):** VIX rule ="
-        f" {hit_vix2}/{len(ep2_dev)} ({100 * hit_vix2 // len(ep2_dev)}%)"
+        "A candidate model must exceed **both** VIX level and VIX z52 on the development"
+        " folds. Persistence is excluded (oracle reference — not achievable live)."
     )
-    out.append(f"- **Row-level F1 (detect):** VIX rule = {detect_metrics['vix']['f1']:.3f}")
+    out.append("")
+    best_recall = max(hit_level2, hit_z52_2)
+    best_f1 = max(detect_metrics["vix_level"]["f1"], detect_metrics["vix_z52"]["f1"])
+    best_pred = max(hit_pl, hit_pz)
     out.append(
-        f"- **Calm-year false alarm runs:** VIX rule = {len(fa_vix_calm)}"
+        f"- **Event recall (detect, mg=2):**"
+        f" VIX level {pct(hit_level2, len(ep2_dev))},"
+        f" VIX z52 {pct(hit_z52_2, len(ep2_dev))}"
+        f" → beat {pct(best_recall, len(ep2_dev))}"
+    )
+    out.append(
+        f"- **Row-level F1 (detect):**"
+        f" VIX level {detect_metrics['vix_level']['f1']:.3f},"
+        f" VIX z52 {detect_metrics['vix_z52']['f1']:.3f}"
+        f" → beat {best_f1:.3f}"
+    )
+    out.append(
+        f"- **Calm-year false alarm runs:**"
+        f" VIX level {len(fa_level_calm)}, VIX z52 {len(fa_z52_calm)}"
         f" in {len(calm_dev_years)} calm years"
     )
     out.append(
-        f"- **Predict advance-warning recall:** VIX rule ="
-        f" {hit_pv}/{len(ep2_dev)} ({100 * hit_pv // len(ep2_dev)}%)"
-    )
-    out.append("")
-    out.append(
-        "The VIX rule is the bar. A model that does not beat the VIX rule on event recall "
-        "is not an improvement over a simple threshold rule."
+        f"- **Predict advance-warning recall:**"
+        f" VIX level {pct(hit_pl, len(ep2_dev))},"
+        f" VIX z52 {pct(hit_pz, len(ep2_dev))}"
+        f" → beat {pct(best_pred, len(ep2_dev))}"
     )
     out.append("")
 
@@ -547,15 +679,15 @@ def main() -> None:
     pb = subparsers.add_parser(
         "baselines",
         help=(
-            "Run baselines (always-flag, persistence, VIX rule) on development folds "
-            "and write docs/reports/<date>-baselines.md."
+            "Run VIX level and VIX z52 baselines on development folds (labels + VIX"
+            " from DB) and write docs/reports/<date>-baselines.md."
         ),
     )
     pb.add_argument(
-        "--csv",
-        default=str(_DEFAULT_CSV),
-        metavar="PATH",
-        help="Path to the EWS weekly CSV (default: data/raw/ews_weekly_2000_2021.csv).",
+        "--label-set",
+        default="ews_v1",
+        metavar="NAME",
+        help="Label set to read from the database (default: ews_v1).",
     )
     pb.add_argument(
         "--horizon",
@@ -585,6 +717,7 @@ def main() -> None:
         metavar="YEAR",
         help="Last test year in the development folds (default: 2017).",
     )
+    pb.add_argument("--database-url", default=None, metavar="URL")
 
     args = parser.parse_args()
     if args.command == "episodes":

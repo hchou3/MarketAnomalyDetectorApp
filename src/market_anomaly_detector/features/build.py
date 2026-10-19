@@ -213,6 +213,34 @@ def build_from_db(
     return build(prices, spec, tuesdays, as_of=as_of)
 
 
+def weekly_close(
+    session: "Session",
+    instrument_id: str,
+    tuesdays: list[date],
+    as_of: date | None = None,
+) -> np.ndarray:
+    """Return the point-in-time weekly close for *instrument_id* as a float array.
+
+    For each Tuesday the most recently published price (``known_at ≤ Tuesday``)
+    is returned, subject to the same staleness tolerance as :func:`build_from_db`.
+    Returns ``NaN`` for Tuesdays where no fresh observation is available.
+    """
+    dummy_spec = [
+        FeatureSpec(
+            col="_lvl",
+            label="",
+            instrument_id=instrument_id,
+            units="index_points",
+            transform="log_return",
+            window=1,
+        )
+    ]
+    prices = load_prices(session, dummy_spec, as_of=as_of)
+    df = prices.get(instrument_id)
+    tues_idx = pd.DatetimeIndex([pd.Timestamp(t) for t in tuesdays])
+    return _weekly_series(df, tues_idx).to_numpy(dtype=float)
+
+
 # ── Internal helpers ──────────────────────────────────────────────────────────
 
 
