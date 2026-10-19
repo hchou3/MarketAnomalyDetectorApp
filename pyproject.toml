@@ -33,6 +33,7 @@ dev = [
 mad-train = "market_anomaly_detector.train:main"
 mad-backtest = "market_anomaly_detector.backtest:main"
 mad-data = "market_anomaly_detector.cli:main"
+mad-model = "market_anomaly_detector.model_cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
