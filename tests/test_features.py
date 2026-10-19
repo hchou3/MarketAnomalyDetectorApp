@@ -14,7 +14,6 @@ import pandas as pd
 import pytest
 
 from market_anomaly_detector.features.build import (
-    _daily_series,
     _drawdown,
     _log_return,
     _rvol,
@@ -316,11 +315,10 @@ def test_rvol_constant_price_is_zero():
     """A series with constant prices has log returns of exactly 0 → rvol = 0."""
     d_start = date(2020, 1, 2)
     daily_df = _daily_price_df(d_start, 60, value=100.0)
-    s = _daily_series(daily_df)
 
     tuesdays = _tuesdays(d_start + timedelta(days=21), 3)
     tues_idx = pd.DatetimeIndex([pd.Timestamp(t) for t in tuesdays])
-    rv = _rvol(s, tues_idx, 20)
+    rv = _rvol(daily_df, tues_idx, 20)
     # All log returns are 0 → std = 0
     valid = rv.dropna()
     assert len(valid) >= 1
@@ -344,10 +342,9 @@ def test_rvol_known_volatility():
             "known_at": [d.date() for d in idx],
         }
     )
-    s = _daily_series(daily_df)
     tuesdays = _tuesdays(d_start + timedelta(days=120), 5)
     tues_idx = pd.DatetimeIndex([pd.Timestamp(t) for t in tuesdays])
-    rv = _rvol(s, tues_idx, 20)
+    rv = _rvol(daily_df, tues_idx, 20)
 
     expected = daily_sigma * math.sqrt(252)
     valid = rv.dropna()
@@ -362,7 +359,6 @@ def test_rvol_stale_data_returns_nan():
 
     d_start = date(2020, 1, 2)
     daily_df = _daily_price_df(d_start, 40)
-    s = _daily_series(daily_df)
 
     # Tuesday well after the daily series ends
     last_data = date(2020, 2, 28)
@@ -370,7 +366,7 @@ def test_rvol_stale_data_returns_nan():
     while far_tuesday.weekday() != 1:
         far_tuesday += timedelta(days=1)
     tues_idx = pd.DatetimeIndex([pd.Timestamp(far_tuesday)])
-    rv = _rvol(s, tues_idx, 20)
+    rv = _rvol(daily_df, tues_idx, 20)
     assert math.isnan(rv.iloc[0])
 
 
@@ -612,8 +608,6 @@ def test_spec_v1_build_runs_on_synthetic_data():
     tuesdays = _tuesdays(date(2005, 1, 4), 300)
     prices = _make_prices_for_spec(SPEC_V1, tuesdays, extra_weeks=200)
 
-    # Add daily data for rvol instruments (weekly prices are already present;
-    # _daily_series just uses them sparsely but should not crash)
     df = build(prices, SPEC_V1, tuesdays)
 
     assert df.shape == (300, 51)
@@ -622,3 +616,59 @@ def test_spec_v1_build_runs_on_synthetic_data():
     late = df.iloc[220:]
     nan_frac = late.isna().mean().mean()
     assert nan_frac < 0.05, f"Too many NaNs in late sample: {nan_frac:.1%}"
+
+
+# ── Point-in-time correctness: rvol known_at ─────────────────────────────────
+
+
+def test_rvol_respects_known_at_lag():
+    """rvol with publication_lag_days=10 equals rvol from data truncated to known_at <= t."""
+    n_days = 200
+    lag = 10
+    d_start = date(2020, 1, 2)
+    rng = np.random.default_rng(77)
+    rets = rng.normal(0, 0.01, n_days)
+    prices = np.cumprod(1 + rets) * 100.0
+
+    idx = pd.bdate_range(d_start, periods=n_days)
+    daily_df = pd.DataFrame(
+        {
+            "obs_date": [d.date() for d in idx],
+            "value": prices.tolist(),
+            "known_at": [(d + timedelta(days=lag)).date() for d in idx],
+        }
+    )
+
+    tuesdays = _tuesdays(d_start + timedelta(days=120), 10)
+    tues_idx = pd.DatetimeIndex([pd.Timestamp(t) for t in tuesdays])
+
+    rv_full = _rvol(daily_df, tues_idx, 20)
+
+    for t in tuesdays:
+        masked = daily_df[daily_df["known_at"] <= t].copy()
+        rv_masked = _rvol(masked, pd.DatetimeIndex([pd.Timestamp(t)]), 20)
+        vf = rv_full.loc[pd.Timestamp(t)]
+        vm = rv_masked.iloc[0]
+        if math.isnan(vf):
+            assert math.isnan(vm), f"t={t}: full=NaN but masked={vm}"
+        else:
+            assert vm == pytest.approx(vf, rel=1e-9), (
+                f"rvol point-in-time violation at t={t}: full={vf}, masked={vm}"
+            )
+
+
+# ── Stale carry-forward ───────────────────────────────────────────────────────
+
+
+def test_weekly_series_gap_returns_nan():
+    """A daily series with a 1-year gap produces NaN for weeks inside the gap."""
+    before = pd.bdate_range(date(2019, 1, 2), periods=65)
+    after = pd.bdate_range(date(2020, 4, 1), periods=10)
+    all_obs = [d.date() for d in before] + [d.date() for d in after]
+    df = _price_df(all_obs, [100.0] * len(all_obs), lag_days=0)
+
+    # Tuesday well inside the gap (Dec 2019 — ~9 months after data stops)
+    gap_tuesday = date(2019, 12, 3)
+    tues_idx = pd.DatetimeIndex([pd.Timestamp(gap_tuesday)])
+    s = _weekly_series(df, tues_idx)
+    assert math.isnan(s.iloc[0])

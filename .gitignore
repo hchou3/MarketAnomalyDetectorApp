@@ -26,6 +26,9 @@ artifacts/
 *.onnx
 model_repository/
 
+# Live provider downloads (use scripts/record_fixtures.py)
+data/recordings/
+
 # Jupyter
 .ipynb_checkpoints/
 

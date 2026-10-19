@@ -16,8 +16,10 @@ build_from_db(session, spec, tuesdays, as_of=None) -> pd.DataFrame
 Point-in-time guarantee
 -----------------------
 For each Tuesday t, an observation is usable only when known_at <= t.
-Weekly alignment uses merge_asof on the known_at column.
-Realized-vol daily series uses obs_date (== known_at for daily providers).
+Weekly alignment uses merge_asof on the known_at column with a staleness
+tolerance inferred from the data's native frequency and publication lag.
+Realized-vol daily series is stamped by known_at before the Tuesday
+merge_asof, so publication-lagged series are handled correctly.
 """
 
 from __future__ import annotations
@@ -37,7 +39,7 @@ if TYPE_CHECKING:
 # z-score rolling minimum: require at least this many weeks before producing a value
 _Z_MIN_PERIODS = 104
 
-# maximum gap (days) between a Tuesday and the most recent daily rvol data point
+# maximum gap (days) between a Tuesday and the most recent daily rvol known_at
 _RVOL_STALE_DAYS = 7
 
 # extra historical tuesdays prepended before the requested range so that rolling
@@ -108,14 +110,11 @@ def build(
                     else _nan_series(extended_idx)
                 )
 
-    # Pre-build daily series for rvol features (keyed by instrument_id)
-    daily: dict[str, pd.Series] = {}
+    # Raw DataFrames for rvol features — _rvol handles known_at internally
+    rvol_dfs: dict[str, pd.DataFrame | None] = {}
     for feat in spec:
-        if feat.transform == "rvol" and feat.instrument_id not in daily:
-            df = effective.get(feat.instrument_id)
-            daily[feat.instrument_id] = (
-                _daily_series(df) if df is not None else pd.Series(dtype=float)
-            )
+        if feat.transform == "rvol" and feat.instrument_id not in rvol_dfs:
+            rvol_dfs[feat.instrument_id] = effective.get(feat.instrument_id)
 
     # Compute each feature on the extended index
     out_ext = pd.DataFrame(index=extended_idx, dtype=float)
@@ -129,8 +128,7 @@ def build(
         elif t == "drawdown":
             out_ext[feat.col] = _drawdown(s, feat.window)
         elif t == "rvol":
-            d = daily.get(feat.instrument_id, pd.Series(dtype=float))
-            out_ext[feat.col] = _rvol(d, extended_idx, feat.window)
+            out_ext[feat.col] = _rvol(rvol_dfs.get(feat.instrument_id), extended_idx, feat.window)
         elif t == "z_score":
             out_ext[feat.col] = _z_score(s, feat.units)
         elif t == "spread":
@@ -222,8 +220,31 @@ def _nan_series(idx: pd.DatetimeIndex) -> pd.Series:
     return pd.Series(float("nan"), index=idx, dtype=float)
 
 
+def _stale_tolerance(df: pd.DataFrame) -> pd.Timedelta:
+    """Infer carry-forward tolerance from the data's frequency and publication lag.
+
+    Frequency bucket → buffer: daily (min gap ≤ 2d) → 7d, weekly (≤ 10d) → 14d,
+    monthly → 45d.  The median publication lag is added to the buffer.
+    """
+    if df is None or df.empty:
+        return pd.Timedelta(days=45)
+    ka = pd.to_datetime(df["known_at"])
+    obs = pd.to_datetime(df["obs_date"])
+    lag_days = max(0, int(round((ka - obs).dt.days.median())))
+    obs_sorted = obs.sort_values()
+    gaps = obs_sorted.diff().dt.days.dropna()
+    pos = gaps[gaps > 0]
+    min_gap = int(pos.min()) if len(pos) > 0 else 1
+    buffer = 7 if min_gap <= 2 else (14 if min_gap <= 10 else 45)
+    return pd.Timedelta(days=lag_days + buffer)
+
+
 def _weekly_series(df: pd.DataFrame, tues_idx: pd.DatetimeIndex) -> pd.Series:
     """For each Tuesday, return the most recently published value (known_at <= T).
+
+    Values are carried forward only within the tolerance inferred from the
+    data's native frequency and publication lag.  Gaps beyond the tolerance
+    return NaN instead of a stale value.
 
     Sorting on (known_at, obs_date) ensures that when two rows share the same
     known_at the more recent observation wins.
@@ -242,30 +263,9 @@ def _weekly_series(df: pd.DataFrame, tues_idx: pd.DatetimeIndex) -> pd.Series:
         left_on="_tdt",
         right_on="_ka_dt",
         direction="backward",
+        tolerance=_stale_tolerance(df),
     )
     return pd.Series(merged["value"].values, index=tues_idx, dtype=float)
-
-
-def _daily_series(df: pd.DataFrame) -> pd.Series:
-    """Build a business-day price series from raw daily prices.
-
-    Gaps of up to 5 consecutive business days are forward-filled to handle
-    market holidays.  Longer gaps stay NaN.
-    """
-    if df is None or df.empty:
-        return pd.Series(dtype=float)
-
-    s = pd.Series(
-        df["value"].astype(float).values,
-        index=pd.to_datetime(df["obs_date"]),
-        dtype=float,
-    )
-    s = s.sort_index()
-    # Collapse multiple obs on the same calendar date (take last)
-    s = s.groupby(s.index).last()
-    s = s.resample("B").last()
-    s = s.ffill(limit=5)
-    return s
 
 
 def _log_return(s: pd.Series, weeks: int) -> pd.Series:
@@ -286,23 +286,55 @@ def _drawdown(s: pd.Series, weeks: int) -> pd.Series:
     return log_s - rolling_max
 
 
-def _rvol(daily_s: pd.Series, tues_idx: pd.DatetimeIndex, window_days: int) -> pd.Series:
-    """Annualised realised vol of daily log returns, sampled at each Tuesday."""
-    if daily_s.empty:
+def _rvol(df: pd.DataFrame | None, tues_idx: pd.DatetimeIndex, window_days: int) -> pd.Series:
+    """Annualised realised vol of daily log returns, sampled at each Tuesday.
+
+    Respects known_at: for each Tuesday t, only prices with known_at <= t
+    contribute.  Prices are indexed by obs_date for the rolling std, then
+    re-stamped by known_at before the final merge_asof.
+    """
+    if df is None or (isinstance(df, pd.DataFrame) and df.empty):
         return _nan_series(tues_idx)
 
-    log_ret = np.log(daily_s.astype(float) / daily_s.shift(1))
-    rv = log_ret.rolling(window_days, min_periods=max(1, window_days // 2)).std() * math.sqrt(252)
+    work = df.copy()
+    work["_obs_dt"] = pd.to_datetime(work["obs_date"])
+    work["_ka_dt"] = pd.to_datetime(work["known_at"])
+    # Dedup: if multiple rows share obs_date, keep the one with the latest known_at
+    work = work.sort_values(["_obs_dt", "_ka_dt"]).groupby("_obs_dt", as_index=False).last()
 
-    rv_df = rv.dropna().reset_index()
-    rv_df.columns = pd.Index(["_date", "_rv"])
+    # Business-day price series indexed by obs_date; short holiday gaps filled
+    price_s = (
+        pd.Series(work["value"].astype(float).values, index=work["_obs_dt"])
+        .sort_index()
+        .resample("B")
+        .last()
+        .ffill(limit=5)
+    )
 
+    # Rolling realized vol indexed by obs_date
+    log_ret = np.log(price_s / price_s.shift(1))
+    rv_by_obs = log_ret.rolling(
+        window_days, min_periods=max(1, window_days // 2)
+    ).std() * math.sqrt(252)
+
+    # For each obs_date with a valid rvol, find its publication date (known_at).
+    # Forward-filled dates (from resample/ffill) inherit the last actual known_at.
+    rv_df = rv_by_obs.dropna().reset_index()
+    rv_df.columns = pd.Index(["_obs_dt", "_rv"])
+    rv_with_ka = pd.merge_asof(
+        rv_df,
+        work[["_obs_dt", "_ka_dt"]],
+        on="_obs_dt",
+        direction="backward",
+    ).sort_values(["_ka_dt", "_obs_dt"])
+
+    # Sample at each Tuesday: latest rvol where known_at <= tuesday
     tues_df = pd.DataFrame({"_tdt": tues_idx})
     merged = pd.merge_asof(
         tues_df,
-        rv_df,
+        rv_with_ka[["_ka_dt", "_rv"]],
         left_on="_tdt",
-        right_on="_date",
+        right_on="_ka_dt",
         direction="backward",
         tolerance=pd.Timedelta(days=_RVOL_STALE_DAYS),
     )
