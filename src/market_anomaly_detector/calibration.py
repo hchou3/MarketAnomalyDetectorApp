@@ -1,8 +1,8 @@
 """Platt (sigmoid) calibration with explicit (a, b) parameters.
 
 PlattCalibrator fits by minimising binary cross-entropy via L-BFGS-B.
-onnx_export_with_platt() appends the sigmoid node to an existing ONNX model
-so that (pipeline + Platt) can be verified end-to-end.
+onnx_export_with_platt() converts a fitted sklearn pipeline + Platt calibration
+to ONNX bytes for inference-time deployment.
 """
 
 from __future__ import annotations
@@ -11,6 +11,9 @@ import numpy as np
 from scipy.optimize import minimize
 from scipy.special import expit
 from sklearn.base import BaseEstimator
+
+# Guards for idempotent registration
+_CONVERTERS_REGISTERED = False
 
 
 class PlattCalibrator(BaseEstimator):
@@ -73,36 +76,92 @@ def _apply_skl2onnx_shims() -> None:
         te.add_node = _add_node_shim
 
 
-def _register_iso_appender() -> None:
-    """Register a skl2onnx converter for IsoForestAppender.
+def _register_converters() -> None:
+    """Register skl2onnx converters for MedianImputeWithIndicator and IsoForestAppender.
 
-    The converter raises NotImplementedError (subgraph embedding is non-trivial),
-    so the ONNX gate will report passed=False cleanly rather than crashing on
-    "unknown operator type".
+    Uses lazy import (called inside onnx_export_with_platt) to avoid circular imports
+    between calibration.py and selection.py.  Idempotent: subsequent calls are no-ops.
     """
+    global _CONVERTERS_REGISTERED
+    if _CONVERTERS_REGISTERED:
+        return
+
     try:
+        import onnx as _onnx
         from skl2onnx import update_registered_converter
+        from skl2onnx.algebra.onnx_operator import OnnxSubEstimator
+        from skl2onnx.algebra.onnx_ops import OnnxCast, OnnxConcat, OnnxIsNaN, OnnxWhere
         from skl2onnx.common.data_types import FloatTensorType
 
-        from .selection import IsoForestAppender
+        # Lazy to avoid circular: calibration ← selection ← calibration
+        from .selection import IsoForestAppender, MedianImputeWithIndicator
+
+        # ── MedianImputeWithIndicator ─────────────────────────────────────────
+
+        def _mii_shape(operator):
+            n = operator.inputs[0].get_first_dimension()
+            f = operator.inputs[0].type.shape[1]
+            operator.outputs[0].type = FloatTensorType([n, 2 * f])
+
+        def _mii_convert(scope, operator, container):
+            op = operator.raw_operator
+            X = operator.inputs[0]
+            opv = container.target_opset
+            nan = OnnxIsNaN(X, op_version=opv)
+            filled = OnnxWhere(
+                nan,
+                op.medians_.astype(np.float32).reshape(1, -1),
+                X,
+                op_version=opv,
+            )
+            ind = OnnxCast(nan, to=_onnx.TensorProto.FLOAT, op_version=opv)
+            OnnxConcat(
+                filled, ind, axis=1, op_version=opv, output_names=operator.outputs[:1]
+            ).add_to(scope, container)
+
+        update_registered_converter(
+            MedianImputeWithIndicator,
+            "MadMedianImputeWithIndicator",
+            _mii_shape,
+            _mii_convert,
+        )
+
+        # ── IsoForestAppender ─────────────────────────────────────────────────
 
         def _iso_shape(operator):
-            n_in = operator.inputs[0].type.shape[1]
-            operator.outputs[0].type = FloatTensorType([None, n_in + 1])
+            n = operator.inputs[0].get_first_dimension()
+            f = operator.inputs[0].type.shape[1]
+            operator.outputs[0].type = FloatTensorType([n, f + 1])
 
         def _iso_convert(scope, operator, container):
-            raise NotImplementedError(
-                "IsoForestAppender ONNX subgraph embedding not implemented; gate fails cleanly."
+            op = operator.raw_operator
+            X = operator.inputs[0]
+            opv = container.target_opset
+            # IsolationForest outputs [label, scores]; index 1 = decision_function
+            sub = OnnxSubEstimator(op.iso_, X, op_version=opv)
+            score = sub[1]
+            OnnxConcat(X, score, axis=1, op_version=opv, output_names=operator.outputs[:1]).add_to(
+                scope, container
             )
 
         update_registered_converter(
-            IsoForestAppender, "CustomIsoForestAppender", _iso_shape, _iso_convert
+            IsoForestAppender,
+            "MadIsoForestAppender",
+            _iso_shape,
+            _iso_convert,
         )
+
+        _CONVERTERS_REGISTERED = True
     except Exception:
-        pass
+        pass  # skl2onnx not available or registration failed; gate will report passed=False
 
 
-def onnx_export_with_platt(pipeline, platt: PlattCalibrator, n_features: int) -> bytes:
+def onnx_export_with_platt(
+    pipeline,
+    platt: PlattCalibrator,
+    n_features: int,
+    X_sample: np.ndarray | None = None,
+) -> bytes:
     """Export sklearn pipeline + Platt calibration to ONNX bytes.
 
     The returned model takes a float32 input of shape [N, n_features] and
@@ -113,38 +172,36 @@ def onnx_export_with_platt(pipeline, platt: PlattCalibrator, n_features: int) ->
     """
     import onnx
     from onnx import TensorProto, helper, numpy_helper
-    from skl2onnx import convert_sklearn
-    from skl2onnx.common.data_types import FloatTensorType
+    from skl2onnx import to_onnx
 
     _apply_skl2onnx_shims()
-    _register_iso_appender()
+    _register_converters()
 
-    initial_type = [("float_input", FloatTensorType([None, n_features]))]
-    # zipmap=False ensures probabilities come out as a float32 tensor, not a ZipMap sequence
-    onnx_model = convert_sklearn(
+    if X_sample is None:
+        X_sample = np.zeros((5, n_features), dtype=np.float32)
+
+    # Use a small sample for shape inference; NaN entries are fine (tracers use shapes only)
+    clf_step = pipeline.steps[-1][1]
+    onnx_model = to_onnx(
         pipeline,
-        initial_types=initial_type,
-        target_opset=18,
-        options={"zipmap": False},
+        X_sample[:5].astype(np.float32),
+        options={id(clf_step): {"zipmap": False}},
+        target_opset={"": 17, "ai.onnx.ml": 3},
     )
 
-    # Find the probability output (shape [N, 2]) — skl2onnx names it "probabilities"
-    prob_output_name = None
-    for output in onnx_model.graph.output:
-        if "probab" in output.name.lower():
-            prob_output_name = output.name
-            break
-    if prob_output_name is None:
-        prob_output_name = onnx_model.graph.output[-1].name
+    # to_onnx with zipmap=False produces: output[0]=labels (int64 [N]),
+    # output[1]=probabilities (float32 [N, 2])
+    prob_output_name = onnx_model.graph.output[1].name
 
-    # Remove existing outputs so we can add our own
+    # Remove existing outputs; nodes that produce them remain in the graph
     while onnx_model.graph.output:
         onnx_model.graph.output.pop()
 
-    # Gather index 1 along axis 1 to get class-1 probs (shape [N])
+    # Gather class-1 probability: Gather(probs, index=1, axis=1) → shape [N]
     gather_out = "__platt_gather"
     idx_name = "__platt_idx"
-    idx_tensor = numpy_helper.from_array(np.array([1], dtype=np.int64), name=idx_name)
+    # Scalar index (0-D) so Gather reduces the axis → shape [N], not [N, 1]
+    idx_tensor = numpy_helper.from_array(np.array(1, dtype=np.int64), name=idx_name)
     onnx_model.graph.initializer.append(idx_tensor)
     gather_node = helper.make_node(
         "Gather", inputs=[prob_output_name, idx_name], outputs=[gather_out], axis=1
@@ -161,10 +218,13 @@ def onnx_export_with_platt(pipeline, platt: PlattCalibrator, n_features: int) ->
     add_out = "__platt_add"
     final_out = "calibrated_probability"
 
-    mul_node = helper.make_node("Mul", inputs=[gather_out, a_name], outputs=[mul_out])
-    add_node = helper.make_node("Add", inputs=[mul_out, b_name], outputs=[add_out])
-    sig_node = helper.make_node("Sigmoid", inputs=[add_out], outputs=[final_out])
-    onnx_model.graph.node.extend([mul_node, add_node, sig_node])
+    onnx_model.graph.node.append(
+        helper.make_node("Mul", inputs=[gather_out, a_name], outputs=[mul_out])
+    )
+    onnx_model.graph.node.append(
+        helper.make_node("Add", inputs=[mul_out, b_name], outputs=[add_out])
+    )
+    onnx_model.graph.node.append(helper.make_node("Sigmoid", inputs=[add_out], outputs=[final_out]))
 
     final_output_info = helper.make_tensor_value_info(final_out, TensorProto.FLOAT, [None])
     onnx_model.graph.output.append(final_output_info)
