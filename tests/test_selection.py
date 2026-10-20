@@ -9,6 +9,7 @@ import math
 from datetime import date, timedelta
 
 import numpy as np
+import pandas as pd
 import pytest
 
 from market_anomaly_detector.calibration import PlattCalibrator
@@ -407,3 +408,34 @@ def test_median_impute_with_indicator_medians_from_fit_rows():
     assert out[0, 3] == pytest.approx(1.0)  # was-missing indicator col1
     assert out[1, 0] == pytest.approx(10.0)  # not NaN → unchanged
     assert out[1, 2] == pytest.approx(0.0)  # not missing → indicator = 0
+
+
+# ── Core-feature mask ─────────────────────────────────────────────────────────
+
+
+def test_core_feature_mask_uses_spec_v1_col_names():
+    """_core_feature_mask uses SPEC_V1 instrument_id, not name prefixes.
+
+    sp500_lr_1w (instrument_id='msci_usa') and spread_10y_3m
+    (instrument_id='us_10y_yield') are both core; a NaN in either must
+    mark that row as excluded (mask=False).
+    """
+    from market_anomaly_detector.selection import _core_feature_mask
+
+    # Two rows, three columns: one vix col, one sp500 col, one spread col.
+    # Row 0: all present → keep.
+    # Row 1: sp500_lr_1w is NaN → exclude.
+    # Row 2: spread_10y_3m is NaN → exclude.
+    cols = ["vix_lr_1w", "sp500_lr_1w", "spread_10y_3m"]
+    X_arr = np.array(
+        [
+            [15.0, 0.01, 0.5],  # row 0: all present
+            [15.0, np.nan, 0.5],  # row 1: sp500 NaN (msci_usa core)
+            [15.0, 0.01, np.nan],  # row 2: spread_10y NaN (us_10y_yield core)
+        ]
+    )
+    X_df = pd.DataFrame(X_arr, columns=cols)
+    mask = _core_feature_mask(X_df, X_arr)
+    assert mask[0] is np.bool_(True), "Row 0 (all present) should be kept"
+    assert mask[1] is np.bool_(False), "Row 1 (sp500_lr_1w NaN) should be excluded"
+    assert mask[2] is np.bool_(False), "Row 2 (spread_10y_3m NaN) should be excluded"
