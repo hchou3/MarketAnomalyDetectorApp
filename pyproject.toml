@@ -59,6 +59,8 @@ select = ["E", "F", "I"]
 [tool.ruff.lint.per-file-ignores]
 # Long f-strings in the CLI report; split them when backtest.py is reworked in Phase 2.
 "src/market_anomaly_detector/backtest.py" = ["E501"]
+# Long markdown strings in report writer.
+"src/market_anomaly_detector/selection.py" = ["E501"]
 # Inline fixture dicts are clearer when kept on one line even if slightly long.
 "tests/test_registry.py" = ["E501"]
 
@@ -67,4 +69,10 @@ testpaths = ["tests"]
 markers = [
     "db: requires a live Postgres database (set MAD_TEST_DATABASE_URL)",
     "network: requires live internet access (skipped in offline CI)",
+]
+
+[dependency-groups]
+dev = [
+    "onnxruntime>=1.18",
+    "skl2onnx>=1.20,<1.21",
 ]

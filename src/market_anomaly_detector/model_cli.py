@@ -642,6 +642,41 @@ def _cmd_baselines(args: argparse.Namespace) -> int:
     return 0
 
 
+# ── select ────────────────────────────────────────────────────────────────────
+
+
+def _cmd_select(args: argparse.Namespace) -> int:
+    from pathlib import Path
+
+    from sqlalchemy.orm import Session
+
+    from .db.engine import create_engine
+    from .selection import N_BOOT, run_selection
+
+    out_dir = Path(args.out_dir) if args.out_dir else _REPORTS_DIR
+    n_boot = 0 if args.no_boot else (args.n_boot or N_BOOT)
+
+    try:
+        engine = create_engine(url=args.database_url)
+        with Session(engine) as session:
+            _require_db_ready(engine)
+            return run_selection(
+                session=session,
+                out_dir=out_dir,
+                label_set=args.label_set,
+                first_test_year=args.first_test_year,
+                last_test_year=args.last_test_year,
+                n_boot=n_boot,
+                csv_path=Path(args.csv) if args.csv else None,
+                skip_bootstrap=args.no_boot,
+            )
+    except SystemExit:
+        raise
+    except Exception as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+
+
 # ── main ──────────────────────────────────────────────────────────────────────
 
 
@@ -719,11 +754,60 @@ def main() -> None:
     )
     pb.add_argument("--database-url", default=None, metavar="URL")
 
+    # ── select ────────────────────────────────────────────────────────────────
+    ps = subparsers.add_parser(
+        "select",
+        help=(
+            "Run candidate models on development folds and select the best one. "
+            "Writes docs/reports/<date>-model-selection.md. Requires a populated DB."
+        ),
+    )
+    ps.add_argument("--label-set", default="ews_v1", metavar="NAME")
+    ps.add_argument("--database-url", default=None, metavar="URL")
+    ps.add_argument(
+        "--out-dir",
+        default=None,
+        metavar="DIR",
+        help="Directory to write the report (default: docs/reports/).",
+    )
+    ps.add_argument(
+        "--no-boot",
+        action="store_true",
+        help="Skip year-block bootstrap (faster, no confidence intervals).",
+    )
+    ps.add_argument(
+        "--n-boot",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Bootstrap resamples (default: 2000).",
+    )
+    ps.add_argument(
+        "--first-test-year",
+        type=int,
+        default=2008,
+        metavar="YEAR",
+    )
+    ps.add_argument(
+        "--last-test-year",
+        type=int,
+        default=2017,
+        metavar="YEAR",
+    )
+    ps.add_argument(
+        "--csv",
+        default=None,
+        metavar="PATH",
+        help="Path to old EWS CSV for evaluating old baselines (optional).",
+    )
+
     args = parser.parse_args()
     if args.command == "episodes":
         sys.exit(_cmd_episodes(args))
     elif args.command == "baselines":
         sys.exit(_cmd_baselines(args))
+    elif args.command == "select":
+        sys.exit(_cmd_select(args))
     else:
         parser.print_help()
         sys.exit(1)
