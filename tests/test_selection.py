@@ -15,6 +15,7 @@ from market_anomaly_detector.calibration import PlattCalibrator
 from market_anomaly_detector.episodes import Episode
 from market_anomaly_detector.eval_harness import choose_threshold
 from market_anomaly_detector.selection import (
+    MedianImputeWithIndicator,
     OnnxGateResult,
     _guard_dev_only,
     apply_selection_rule,
@@ -309,13 +310,7 @@ except ImportError:
 
 @pytest.mark.skipif(not ONNX_AVAILABLE, reason="skl2onnx/onnxruntime not installed")
 def test_onnx_parity_logreg():
-    """LogReg pipeline + Platt: parity ≤1e-5 if export succeeds, else clean gate failure.
-
-    Uses 500 rows with 15% NaN to match realistic inputs (Fix 3).
-    Note: skl2onnx 1.20 does not propagate shape expansion from
-    SimpleImputer(add_indicator=True) to downstream StandardScaler.
-    The gate must report passed=False cleanly in that case (no crash).
-    """
+    """LogReg + MedianImputeWithIndicator + Platt: parity ≤1e-5, 500 rows 15% NaN."""
     from market_anomaly_detector.selection import check_onnx_gate, make_logreg_pipeline
 
     X, y = _make_synthetic_data(500, 10, nan_frac=0.15)
@@ -332,22 +327,17 @@ def test_onnx_parity_logreg():
 
     gate = check_onnx_gate("logreg", pipe, platt, X_val, n_features)
 
-    if gate.passed:
-        assert gate.max_diff is not None
-        assert gate.max_diff <= 1e-5, f"Max diff {gate.max_diff:.2e} exceeds 1e-5"
-    else:
-        # Known skl2onnx 1.20 limitation: add_indicator=True breaks shape propagation
-        assert gate.error is not None, "Gate should report an error message on failure"
-        assert gate.max_diff is None
+    assert gate.passed, f"LogReg ONNX gate failed: {gate.error}"
+    assert gate.max_diff is not None
+    assert gate.max_diff <= 1e-5, f"Max diff {gate.max_diff:.2e} exceeds 1e-5"
 
 
 @pytest.mark.skipif(not ONNX_AVAILABLE, reason="skl2onnx/onnxruntime not installed")
 def test_onnx_parity_hgb():
-    """HGB pipeline + Platt exports to ONNX and matches sklearn within 1e-5.
+    """HGB + Platt exports to ONNX and matches sklearn within 1e-5, 500 rows 15% NaN.
 
-    The HGB shim in calibration.py (Fix 1) casts nodes_missing_value_tracks_true
-    to int, fixing the skl2onnx 1.20 / onnx 1.23 incompatibility.
-    Uses 500 rows with 15% NaN (HGB handles NaN natively).
+    The HGB shim in calibration.py casts nodes_missing_value_tracks_true to int,
+    fixing the skl2onnx 1.20 / onnx 1.23 incompatibility.
     """
     from market_anomaly_detector.selection import check_onnx_gate, make_hgb_pipeline
 
@@ -365,27 +355,23 @@ def test_onnx_parity_hgb():
 
     gate = check_onnx_gate("hgb", pipe, platt, X_val, n_features)
 
-    if gate.passed:
-        assert gate.max_diff is not None
-        assert gate.max_diff <= 1e-5, f"Max diff {gate.max_diff:.2e} exceeds 1e-5"
-    else:
-        # If shim didn't fix it, gate must still report cleanly (no crash)
-        assert gate.error is not None, "Gate should report an error message on failure"
-        assert gate.max_diff is None
+    assert gate.passed, f"HGB ONNX gate failed: {gate.error}"
+    assert gate.max_diff is not None
+    assert gate.max_diff <= 1e-5, f"Max diff {gate.max_diff:.2e} exceeds 1e-5"
 
 
 @pytest.mark.skipif(not ONNX_AVAILABLE, reason="skl2onnx/onnxruntime not installed")
-def test_onnx_parity_twostage_gate_fails_cleanly():
-    """Two-stage pipeline with IsoForestAppender: gate must report passed=False without crash."""
+def test_onnx_parity_twostage():
+    """Two-stage + Platt exports to ONNX and matches sklearn within 1e-5, 500 rows 15% NaN.
+
+    MedianImputeWithIndicator handles NaN on fit; IsoForestAppender uses OnnxSubEstimator.
+    """
     from market_anomaly_detector.selection import check_onnx_gate, make_twostage_pipeline
 
     X, y = _make_synthetic_data(500, 10, nan_frac=0.15)
     n_features = X.shape[1]
 
-    # Fill NaN for twostage since imputer + iso needs valid data to fit
-    X_filled = np.nan_to_num(X, nan=0.0)
-
-    X_train, X_val = X_filled[:400], X_filled[400:]
+    X_train, X_val = X[:400], X[400:]
     y_train, y_val = y[:400], y[400:]
 
     pipe = make_twostage_pipeline()
@@ -395,6 +381,29 @@ def test_onnx_parity_twostage_gate_fails_cleanly():
     platt = PlattCalibrator().fit(val_raw, y_val)
 
     gate = check_onnx_gate("twostage", pipe, platt, X_val, n_features)
-    # Two-stage cannot pass ONNX gate (IsoForestAppender subgraph not implemented)
-    assert gate.passed is False
-    assert gate.error is not None  # must report why, not silently pass
+
+    assert gate.passed, f"Two-stage ONNX gate failed: {gate.error}"
+    assert gate.max_diff is not None
+    assert gate.max_diff <= 1e-5, f"Max diff {gate.max_diff:.2e} exceeds 1e-5"
+
+
+def test_median_impute_with_indicator_medians_from_fit_rows():
+    """MedianImputeWithIndicator medians come from fit rows only, not transform rows."""
+    imp = MedianImputeWithIndicator()
+    # col0: values 1 and 3 (NaN excluded) → median 2.0
+    # col1: values 4 and 6 (NaN excluded) → median 5.0
+    X_fit = np.array([[1.0, np.nan], [3.0, 4.0], [np.nan, 6.0]])
+    imp.fit(X_fit)
+    assert imp.medians_[0] == pytest.approx(2.0)
+    assert imp.medians_[1] == pytest.approx(5.0)
+
+    # Transform on different data: NaN slots filled with fit medians
+    X_test = np.array([[np.nan, np.nan], [10.0, 20.0]])
+    out = imp.transform(X_test)
+    assert out.shape == (2, 4)  # 2 features + 2 indicators
+    assert out[0, 0] == pytest.approx(2.0)  # col0 NaN → filled with fit median
+    assert out[0, 1] == pytest.approx(5.0)  # col1 NaN → filled with fit median
+    assert out[0, 2] == pytest.approx(1.0)  # was-missing indicator col0
+    assert out[0, 3] == pytest.approx(1.0)  # was-missing indicator col1
+    assert out[1, 0] == pytest.approx(10.0)  # not NaN → unchanged
+    assert out[1, 2] == pytest.approx(0.0)  # not missing → indicator = 0

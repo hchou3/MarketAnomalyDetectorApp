@@ -9,6 +9,7 @@ ONNX gate: candidates failing export or parity check are ineligible for selectio
 
 from __future__ import annotations
 
+import copy
 import math
 from dataclasses import dataclass
 from datetime import date
@@ -24,7 +25,6 @@ from sklearn.ensemble import (
     RandomForestClassifier,
     StackingClassifier,
 )
-from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LogisticRegression
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
@@ -83,7 +83,26 @@ class CandidateResult:
     onnx_gate: OnnxGateResult
 
 
-# ── Custom transformer ────────────────────────────────────────────────────────
+# ── Custom transformers ───────────────────────────────────────────────────────
+
+
+class MedianImputeWithIndicator(BaseEstimator, TransformerMixin):
+    """Median-impute, then append one 0/1 'was missing' column per feature.
+
+    Medians are computed from fit rows only; transform rows use the stored medians.
+    This is ONNX-exportable via the converter registered in calibration.py.
+    """
+
+    def fit(self, X, y=None):
+        X = np.asarray(X, dtype=float)
+        med = np.nanmedian(X, axis=0)
+        self.medians_ = np.where(np.isnan(med), 0.0, med)
+        return self
+
+    def transform(self, X):
+        X = np.asarray(X, dtype=float)
+        nan = np.isnan(X)
+        return np.hstack([np.where(nan, self.medians_, X), nan.astype(float)])
 
 
 class IsoForestAppender(BaseEstimator, TransformerMixin):
@@ -123,19 +142,30 @@ class IsoForestAppender(BaseEstimator, TransformerMixin):
 # ── Model factories ───────────────────────────────────────────────────────────
 
 
-def _core_feature_col(X_df: pd.DataFrame) -> int | None:
-    """Return column index of 'vix_lr_1w' in X_df, or None if not present."""
-    cols = list(X_df.columns) if hasattr(X_df, "columns") else []
-    for i, c in enumerate(cols):
-        if str(c).lower() == "vix_lr_1w":
-            return i
-    return None
+def _core_feature_mask(X_df, X_arr: np.ndarray) -> np.ndarray:
+    """Return bool array: True = row has all core features present.
+
+    Core features: columns starting with 'vix_', 'msci_usa_', or 'us_10y_yield_'.
+    A row is excluded if NaN in ANY core column.
+    If no core columns exist (e.g. synthetic test data), all rows are kept.
+    """
+    if not hasattr(X_df, "columns"):
+        return np.ones(len(X_arr), dtype=bool)
+    prefixes = ("vix_", "msci_usa_", "us_10y_yield_")
+    cols = list(X_df.columns)
+    core_idx = [
+        i for i, c in enumerate(cols) if any(str(c).lower().startswith(p) for p in prefixes)
+    ]
+    if not core_idx:
+        return np.ones(len(X_arr), dtype=bool)
+    core_sub = X_arr[:, core_idx]
+    return ~np.any(np.isnan(core_sub), axis=1)
 
 
 def make_logreg_pipeline() -> Pipeline:
     return Pipeline(
         [
-            ("imputer", SimpleImputer(strategy="median", add_indicator=True)),
+            ("imputer", MedianImputeWithIndicator()),
             ("scaler", StandardScaler()),
             (
                 "clf",
@@ -171,7 +201,7 @@ def make_hgb_pipeline() -> Pipeline:
 def make_twostage_pipeline() -> Pipeline:
     return Pipeline(
         [
-            ("imputer", SimpleImputer(strategy="median", add_indicator=True)),
+            ("imputer", MedianImputeWithIndicator()),
             (
                 "iso_appender",
                 IsoForestAppender(n_estimators=500, contamination="auto", random_state=42),
@@ -218,6 +248,25 @@ CANDIDATES: dict[str, Callable[[], Pipeline]] = {
     "twostage": make_twostage_pipeline,
 }
 SIMPLICITY_ORDER = ["logreg", "hgb", "twostage"]
+
+
+# ── ONNX helpers ─────────────────────────────────────────────────────────────
+
+
+def _set_njobs_1(pipeline: Pipeline) -> None:
+    """Recursively set n_jobs=1 on all sub-estimators (for ONNX determinism).
+
+    Only called on a deepcopy used for the gate; training pipeline stays parallel.
+    """
+    for _, step in pipeline.steps:
+        if hasattr(step, "n_jobs"):
+            step.n_jobs = 1
+        if hasattr(step, "estimators"):
+            for _, est in step.estimators:
+                if hasattr(est, "n_jobs"):
+                    est.n_jobs = 1
+        if hasattr(step, "final_estimator") and hasattr(step.final_estimator, "n_jobs"):
+            step.final_estimator.n_jobs = 1
 
 
 # ── Guard ─────────────────────────────────────────────────────────────────────
@@ -406,7 +455,7 @@ def check_onnx_gate(
         return OnnxGateResult(passed=False, max_diff=None, error=f"ImportError: {e}")
 
     try:
-        onnx_bytes = onnx_export_with_platt(pipeline, platt, n_features)
+        onnx_bytes = onnx_export_with_platt(pipeline, platt, n_features, X_sample=X_sample[:5])
     except Exception as e:
         return OnnxGateResult(passed=False, max_diff=None, error=f"Export failed: {e}")
 
@@ -501,12 +550,8 @@ def evaluate_candidate(
     X_all = X_df.values.astype(float) if hasattr(X_df, "values") else np.asarray(X_df)
     n_features = X_all.shape[1]
 
-    # Core-feature mask: rows where vix_lr_1w is NOT NaN are usable
-    core_col = _core_feature_col(X_df) if hasattr(X_df, "columns") else None
-    if core_col is not None:
-        core_ok = ~np.isnan(X_all[:, core_col])
-    else:
-        core_ok = np.ones(len(X_all), dtype=bool)  # no filtering in synthetic tests
+    # Core-feature mask: rows with all core features present (vix_*, msci_usa_*, us_10y_yield_*)
+    core_ok = _core_feature_mask(X_df, X_all)
 
     detect_folds: list[FoldResult] = []
     predict_folds: list[FoldResult] = []
@@ -634,12 +679,15 @@ def evaluate_candidate(
             )
         )
 
-    # ONNX gate: 500 synthetic rows with 15% NaN (Fix 3)
+    # ONNX gate: 500 synthetic rows with 15% NaN.
+    # Use deepcopy with n_jobs=1 for determinism; training pipeline stays parallel.
     if detect_folds and last_pipe_d is not None:
         gate_rng = np.random.default_rng(42)
         X_gate = gate_rng.standard_normal((500, n_features)).astype(np.float32)
         X_gate[gate_rng.random((500, n_features)) < 0.15] = np.nan
-        gate = check_onnx_gate(name, last_pipe_d, last_platt_d, X_gate, n_features)
+        pipe_gate_onnx = copy.deepcopy(last_pipe_d)
+        _set_njobs_1(pipe_gate_onnx)
+        gate = check_onnx_gate(name, pipe_gate_onnx, last_platt_d, X_gate, n_features)
     else:
         gate = OnnxGateResult(
             passed=False, max_diff=None, error="No folds completed for gate test."
