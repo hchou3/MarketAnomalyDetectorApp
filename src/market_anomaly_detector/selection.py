@@ -145,17 +145,21 @@ class IsoForestAppender(BaseEstimator, TransformerMixin):
 def _core_feature_mask(X_df, X_arr: np.ndarray) -> np.ndarray:
     """Return bool array: True = row has all core features present.
 
-    Core features: columns starting with 'vix_', 'msci_usa_', or 'us_10y_yield_'.
+    Core instruments: vix, msci_usa, us_10y_yield.  Core columns are those
+    whose FeatureSpec.instrument_id is in that set (e.g. sp500_lr_1w comes
+    from instrument_id="msci_usa"; spread_10y_3m from "us_10y_yield").
     A row is excluded if NaN in ANY core column.
     If no core columns exist (e.g. synthetic test data), all rows are kept.
     """
     if not hasattr(X_df, "columns"):
         return np.ones(len(X_arr), dtype=bool)
-    prefixes = ("vix_", "msci_usa_", "us_10y_yield_")
-    cols = list(X_df.columns)
-    core_idx = [
-        i for i, c in enumerate(cols) if any(str(c).lower().startswith(p) for p in prefixes)
-    ]
+
+    from .features.spec import SPEC_V1
+
+    core_instruments = {"vix", "msci_usa", "us_10y_yield"}
+    core_cols = {s.col for s in SPEC_V1 if s.instrument_id in core_instruments}
+    df_cols = list(X_df.columns)
+    core_idx = [i for i, c in enumerate(df_cols) if str(c) in core_cols]
     if not core_idx:
         return np.ones(len(X_arr), dtype=bool)
     core_sub = X_arr[:, core_idx]
