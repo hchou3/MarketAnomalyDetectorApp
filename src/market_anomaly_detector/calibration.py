@@ -47,6 +47,61 @@ class PlattCalibrator(BaseEstimator):
         return self.fit(scores, labels).transform(scores)
 
 
+def _apply_skl2onnx_shims() -> None:
+    """Apply version-specific compatibility patches to skl2onnx before conversion."""
+    import importlib.metadata
+
+    try:
+        ver = importlib.metadata.version("skl2onnx")
+    except importlib.metadata.PackageNotFoundError:
+        return
+
+    if ver.startswith("1.20."):
+        # skl2onnx 1.20 passes np.uint8 for nodes_missing_value_tracks_true; onnx 1.23 rejects
+        # non-int. Fixed upstream but not in 1.20.x.
+        import skl2onnx.common.tree_ensemble as te
+
+        _orig = te.add_node
+
+        def _add_node_shim(*args, nodes_missing_value_tracks_true=0, **kwargs):
+            return _orig(
+                *args,
+                nodes_missing_value_tracks_true=int(nodes_missing_value_tracks_true),
+                **kwargs,
+            )
+
+        te.add_node = _add_node_shim
+
+
+def _register_iso_appender() -> None:
+    """Register a skl2onnx converter for IsoForestAppender.
+
+    The converter raises NotImplementedError (subgraph embedding is non-trivial),
+    so the ONNX gate will report passed=False cleanly rather than crashing on
+    "unknown operator type".
+    """
+    try:
+        from skl2onnx import update_registered_converter
+        from skl2onnx.common.data_types import FloatTensorType
+
+        from .selection import IsoForestAppender
+
+        def _iso_shape(operator):
+            n_in = operator.inputs[0].type.shape[1]
+            operator.outputs[0].type = FloatTensorType([None, n_in + 1])
+
+        def _iso_convert(scope, operator, container):
+            raise NotImplementedError(
+                "IsoForestAppender ONNX subgraph embedding not implemented; gate fails cleanly."
+            )
+
+        update_registered_converter(
+            IsoForestAppender, "CustomIsoForestAppender", _iso_shape, _iso_convert
+        )
+    except Exception:
+        pass
+
+
 def onnx_export_with_platt(pipeline, platt: PlattCalibrator, n_features: int) -> bytes:
     """Export sklearn pipeline + Platt calibration to ONNX bytes.
 
@@ -60,6 +115,9 @@ def onnx_export_with_platt(pipeline, platt: PlattCalibrator, n_features: int) ->
     from onnx import TensorProto, helper, numpy_helper
     from skl2onnx import convert_sklearn
     from skl2onnx.common.data_types import FloatTensorType
+
+    _apply_skl2onnx_shims()
+    _register_iso_appender()
 
     initial_type = [("float_input", FloatTensorType([None, n_features]))]
     # zipmap=False ensures probabilities come out as a float32 tensor, not a ZipMap sequence

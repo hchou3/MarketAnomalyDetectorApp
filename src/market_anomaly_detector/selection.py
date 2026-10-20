@@ -64,6 +64,8 @@ class FoldResult:
     threshold: float
     platt_a: float
     platt_b: float
+    score_status: str = "ok"  # "ok" | "insufficient_data" | "single_class_val"
+    rows_dropped: int = 0
 
 
 @dataclass
@@ -121,10 +123,19 @@ class IsoForestAppender(BaseEstimator, TransformerMixin):
 # ── Model factories ───────────────────────────────────────────────────────────
 
 
+def _core_feature_col(X_df: pd.DataFrame) -> int | None:
+    """Return column index of 'vix_lr_1w' in X_df, or None if not present."""
+    cols = list(X_df.columns) if hasattr(X_df, "columns") else []
+    for i, c in enumerate(cols):
+        if str(c).lower() == "vix_lr_1w":
+            return i
+    return None
+
+
 def make_logreg_pipeline() -> Pipeline:
     return Pipeline(
         [
-            ("imputer", SimpleImputer(strategy="median")),
+            ("imputer", SimpleImputer(strategy="median", add_indicator=True)),
             ("scaler", StandardScaler()),
             (
                 "clf",
@@ -160,7 +171,7 @@ def make_hgb_pipeline() -> Pipeline:
 def make_twostage_pipeline() -> Pipeline:
     return Pipeline(
         [
-            ("imputer", SimpleImputer(strategy="median")),
+            ("imputer", SimpleImputer(strategy="median", add_indicator=True)),
             (
                 "iso_appender",
                 IsoForestAppender(n_estimators=500, contamination="auto", random_state=42),
@@ -243,12 +254,18 @@ def event_precision_recall_f1(
     alert_set: set[date],
     all_weeks: list[date],
     grace_weeks: int = GRACE_WEEKS,
+    known_unlabeled: list | None = None,
 ) -> tuple[float, float, float]:
     """Compute event-level precision, recall, F1.
 
     event_recall = episodes with >=1 alert / total episodes
     event_precision = alert runs overlapping an episode +-grace_weeks / all alert runs
+    Known-unlabeled windows are excluded from false-alarm counts (consistent with
+    choose_threshold which also excludes them).
     """
+    if known_unlabeled is None:
+        known_unlabeled = KNOWN_UNLABELED
+
     if not episodes:
         return 0.0, 0.0, 0.0
 
@@ -259,14 +276,22 @@ def event_precision_recall_f1(
     if total_runs == 0:
         return 0.0, recall, 0.0
 
-    fa = false_alarm_runs(
+    fa_all = false_alarm_runs(
         sorted(alert_set & set(all_weeks)),
         all_weeks,
         episodes,
         grace_weeks=grace_weeks,
-        known_unlabeled=[],
+        known_unlabeled=known_unlabeled,
     )
-    precision = (total_runs - len(fa)) / total_runs
+    # Exclude runs inside known-unlabeled windows from both FA count and total
+    fa_real = [r for r in fa_all if not r.in_known_unlabeled]
+    # Runs in KU windows are also excluded from the denominator
+    ku_runs = len(fa_all) - len(fa_real)
+    effective_total = total_runs - ku_runs
+    if effective_total <= 0:
+        precision = 1.0
+    else:
+        precision = max(0.0, (effective_total - len(fa_real)) / effective_total)
     f1 = 2 * precision * recall / (precision + recall) if precision + recall else 0.0
     return precision, recall, f1
 
@@ -464,6 +489,7 @@ def evaluate_candidate(
 
     Fit PlattCalibrator on val scores. Choose threshold on calibrated val probs
     at FAR_BUDGET. No test data touches the train/val pipeline.
+    Rows where vix_lr_1w is NaN are excluded from fit, val, and test scoring.
     """
     from .labels import build_targets
 
@@ -475,6 +501,13 @@ def evaluate_candidate(
     X_all = X_df.values.astype(float) if hasattr(X_df, "values") else np.asarray(X_df)
     n_features = X_all.shape[1]
 
+    # Core-feature mask: rows where vix_lr_1w is NOT NaN are usable
+    core_col = _core_feature_col(X_df) if hasattr(X_df, "columns") else None
+    if core_col is not None:
+        core_ok = ~np.isnan(X_all[:, core_col])
+    else:
+        core_ok = np.ones(len(X_all), dtype=bool)  # no filtering in synthetic tests
+
     detect_folds: list[FoldResult] = []
     predict_folds: list[FoldResult] = []
 
@@ -482,17 +515,31 @@ def evaluate_candidate(
     last_platt_d: PlattCalibrator | None = None
 
     for fold in folds:
-        test_weeks = all_weeks[fold.test_lo : fold.test_hi]
-        _guard_dev_only(test_weeks)
+        test_weeks_all = all_weeks[fold.test_lo : fold.test_hi]
+        _guard_dev_only(test_weeks_all)
 
-        X_train = X_all[: fold.val_lo]
-        X_val = X_all[fold.val_lo : fold.test_lo]
-        X_test = X_all[fold.test_lo : fold.test_hi]
+        X_train_raw = X_all[: fold.val_lo]
+        X_val_raw = X_all[fold.val_lo : fold.test_lo]
+        X_test_raw = X_all[fold.test_lo : fold.test_hi]
 
-        y_train_det = detect_arr[: fold.val_lo]
-        y_val_det = detect_arr[fold.val_lo : fold.test_lo]
-        y_test_det = detect_arr[fold.test_lo : fold.test_hi]
-        val_ku = ku_mask[fold.val_lo : fold.test_lo]
+        y_train_det_raw = detect_arr[: fold.val_lo]
+        y_val_det_raw = detect_arr[fold.val_lo : fold.test_lo]
+        y_test_det_raw = detect_arr[fold.test_lo : fold.test_hi]
+        val_ku_raw = ku_mask[fold.val_lo : fold.test_lo]
+
+        core_train = core_ok[: fold.val_lo]
+        core_val = core_ok[fold.val_lo : fold.test_lo]
+        core_test = core_ok[fold.test_lo : fold.test_hi]
+
+        X_train = X_train_raw[core_train]
+        y_train_det = y_train_det_raw[core_train]
+        X_val = X_val_raw[core_val]
+        y_val_det = y_val_det_raw[core_val]
+        val_ku = val_ku_raw[core_val]
+        X_test = X_test_raw[core_test]
+        y_test_det = y_test_det_raw[core_test]
+        test_weeks = [w for w, ok in zip(test_weeks_all, core_test) if ok]
+        rows_dropped = int((~core_test).sum())
 
         # detect head
         pipe_d = make_pipeline_fn()
@@ -518,6 +565,7 @@ def evaluate_candidate(
                 threshold=thr_d,
                 platt_a=platt_d.a,  # type: ignore[arg-type]
                 platt_b=platt_d.b,  # type: ignore[arg-type]
+                rows_dropped=rows_dropped,
             )
         )
         last_pipe_d = pipe_d
@@ -527,16 +575,17 @@ def evaluate_candidate(
         train_pred_mask = ~np.isnan(predict_arr[: fold.val_lo])
         val_pred_mask = ~np.isnan(predict_arr[fold.val_lo : fold.test_lo])
 
-        y_train_pred = predict_arr[: fold.val_lo][train_pred_mask].astype(int)
-        X_train_pred = X_train[train_pred_mask]
-        y_val_pred = predict_arr[fold.val_lo : fold.test_lo][val_pred_mask].astype(int)
-        X_val_pred = X_val[val_pred_mask]
-        val_ku_pred = val_ku[val_pred_mask]
+        y_train_pred = predict_arr[: fold.val_lo][core_train & train_pred_mask].astype(int)
+        X_train_pred = X_train_raw[core_train & train_pred_mask]
+        y_val_pred = predict_arr[fold.val_lo : fold.test_lo][core_val & val_pred_mask].astype(int)
+        X_val_pred = X_val_raw[core_val & val_pred_mask]
+        val_ku_pred = val_ku_raw[core_val & val_pred_mask]
 
         test_pred_mask = ~np.isnan(predict_arr[fold.test_lo : fold.test_hi])
-        y_test_pred = predict_arr[fold.test_lo : fold.test_hi][test_pred_mask].astype(int)
-        X_test_pred = X_test[test_pred_mask]
-        test_weeks_pred = [w for w, m in zip(test_weeks, test_pred_mask) if m]
+        combined_test_mask = core_test & test_pred_mask
+        y_test_pred = predict_arr[fold.test_lo : fold.test_hi][combined_test_mask].astype(int)
+        X_test_pred = X_test_raw[combined_test_mask]
+        test_weeks_pred = [w for w, ok in zip(test_weeks_all, combined_test_mask) if ok]
 
         if len(y_train_pred) < 20 or len(np.unique(y_train_pred)) < 2:
             continue
@@ -557,6 +606,7 @@ def evaluate_candidate(
                     threshold=0.5,
                     platt_a=1.0,
                     platt_b=0.0,
+                    score_status="single_class_val",
                 )
             )
             continue
@@ -584,12 +634,15 @@ def evaluate_candidate(
             )
         )
 
-    # ONNX gate using the last fold's trained pipeline
-    if X_sample_for_gate is not None and detect_folds and last_pipe_d is not None:
-        gate = check_onnx_gate(name, last_pipe_d, last_platt_d, X_sample_for_gate, n_features)
+    # ONNX gate: 500 synthetic rows with 15% NaN (Fix 3)
+    if detect_folds and last_pipe_d is not None:
+        gate_rng = np.random.default_rng(42)
+        X_gate = gate_rng.standard_normal((500, n_features)).astype(np.float32)
+        X_gate[gate_rng.random((500, n_features)) < 0.15] = np.nan
+        gate = check_onnx_gate(name, last_pipe_d, last_platt_d, X_gate, n_features)
     else:
         gate = OnnxGateResult(
-            passed=False, max_diff=None, error="No sample provided for gate test."
+            passed=False, max_diff=None, error="No folds completed for gate test."
         )
 
     return CandidateResult(
@@ -718,12 +771,22 @@ def write_selection_report(
     ]
 
     all_names = list(candidates.keys()) + list(baselines.keys())
+    # Always show old baseline rows even if not evaluated (Fix 6)
+    for old_bl in ("old_isoforest", "old_ensemble", "old_ensemble_native05"):
+        if old_bl not in all_names and old_bl not in baselines:
+            all_names.append(old_bl)
     for nm in all_names:
         if nm not in pooled:
+            lines.append(f"| {nm} | not evaluated | — | — | — | — | — |")
             continue
         m = pooled[nm]
-        gate = all_results[nm].onnx_gate
-        gate_str = "pass" if gate.passed else (f"FAIL: {gate.error}" if gate.error else "FAIL")
+        gate = all_results.get(nm)
+        gate_obj = gate.onnx_gate if gate else None
+        gate_str = (
+            "pass"
+            if gate_obj and gate_obj.passed
+            else (f"FAIL: {gate_obj.error}" if gate_obj and gate_obj.error else "n/a")
+        )
         pm = m.get("prob_metrics") or {}
         pr_auc = f"{pm.get('pr_auc', float('nan')):.3f}" if pm else "—"
         brier = f"{pm.get('brier', float('nan')):.3f}" if pm else "—"
@@ -825,10 +888,41 @@ def write_selection_report(
             lines.append("")
             lines.append(
                 "> No candidate beat the VIX level rule on event F1. "
-                "Selection is suspended — proceed to Phase 2 Step 3 for feature engineering."
+                "Stop for a decision (plan 2.4)."
             )
     else:
         lines.append("**No model selected.** " + selection_reason)
+
+    # Fix 4: missing data table (rows dropped per fold)
+    lines += [
+        "",
+        "---",
+        "",
+        "## Missing data per fold",
+        "",
+        "Rows excluded where `vix_lr_1w` is NaN (cannot use core VIX feature).",
+        "",
+        "| Model | Fold year | Rows dropped |",
+        "|-------|-----------|-------------|",
+    ]
+    for nm, cr in candidates.items():
+        for fr in cr.detect_folds:
+            if fr.rows_dropped > 0:
+                lines.append(f"| {nm} | {fr.fold_year} | {fr.rows_dropped} |")
+
+    # Fix 8: predict-head fallback footnote
+    fallback_folds: dict[str, list[int]] = {}
+    for nm, cr in candidates.items():
+        fb_years = [
+            fr.fold_year for fr in cr.predict_folds if fr.score_status == "single_class_val"
+        ]
+        if fb_years:
+            fallback_folds[nm] = fb_years
+    if fallback_folds:
+        lines.append("")
+        lines.append("**Predict-head fallback** (single-class val → threshold=0.5, no Platt):")
+        for nm, years in fallback_folds.items():
+            lines.append(f"- {nm}: fold years {years}")
 
     lines += [
         "",
@@ -933,12 +1027,7 @@ def run_selection(
             d += timedelta(weeks=1)
     calm_years = [y for y in range(first_test_year, last_test_year + 1) if y not in ep_years]
 
-    # Synthetic sample for ONNX gate (use first 20 non-NaN rows)
-    X_all = feature_df.values.astype(float)
-    valid_rows = ~np.any(np.isnan(X_all), axis=1)
-    X_gate = X_all[valid_rows][:20] if valid_rows.sum() >= 20 else X_all[:20]
-
-    # Evaluate candidates
+    # Evaluate candidates (gate sample is built inside evaluate_candidate — Fix 3)
     candidates: dict[str, CandidateResult] = {}
     for cname, factory in CANDIDATES.items():
         print(f"Evaluating candidate: {cname} ...")
@@ -949,7 +1038,6 @@ def run_selection(
             labels_df,
             folds,
             ku_mask,
-            X_sample_for_gate=X_gate,
         )
 
     # Compute pooled metrics for candidates
@@ -957,10 +1045,12 @@ def run_selection(
     for cname, cr in candidates.items():
         pooled[cname] = compute_pooled_metrics(cr.detect_folds, episodes, dev_weeks, calm_years)
 
-    # Old baselines (if CSV available)
+    # Old baselines (Fix 6: warn and skip gracefully if CSV unavailable)
     old_baselines: dict[str, CandidateResult] = {}
-    if csv_path is not None and csv_path.exists():
-        old_baselines = _evaluate_old_baselines(labels_df, folds, csv_path)
+    if csv_path is None or not csv_path.exists():
+        print("Old CSV baselines not evaluated (--csv not provided or file not found).")
+    else:
+        old_baselines = _evaluate_old_baselines(labels_df, folds, csv_path, ku_mask)
         for bname, br in old_baselines.items():
             if br.detect_folds:
                 pooled[bname] = compute_pooled_metrics(
@@ -1026,8 +1116,13 @@ def _evaluate_old_baselines(
     labels_df: pd.DataFrame,
     folds: list[FoldSpec],
     csv_path: Path,
+    ku_mask: np.ndarray,
 ) -> dict[str, CandidateResult]:
-    """Evaluate old 3-feature IsoForest and old ensemble on the same dev folds."""
+    """Evaluate old 3-feature IsoForest and old ensemble on the same dev folds.
+
+    Both use the same Platt + choose_threshold policy as the main candidates.
+    old_ensemble_native05 uses the raw 0.5 threshold without outer Platt (oracle comparison).
+    """
     try:
         from .data import FEATURE_COLS, engineer_features, load_data
     except ImportError:
@@ -1043,93 +1138,163 @@ def _evaluate_old_baselines(
 
     all_weeks: list[date] = list(labels_df["week"])
     results: dict[str, CandidateResult] = {}
+    _gate = OnnxGateResult(passed=False, max_diff=None, error="Baseline — ONNX gate not applied.")
 
-    for baseline_name, feature_cols in [
-        ("old_isoforest", OLD_ISOFOREST_FEATURES),
-        ("old_ensemble", FEATURE_COLS),
-    ]:
-        fold_results_d: list[FoldResult] = []
+    # ── old_isoforest ──────────────────────────────────────────────────────────
+    iso_folds: list[FoldResult] = []
+    for fold in folds:
+        test_weeks = all_weeks[fold.test_lo : fold.test_hi]
+        try:
+            _guard_dev_only(test_weeks)
+        except ValueError:
+            continue
 
-        for fold in folds:
-            test_weeks = all_weeks[fold.test_lo : fold.test_hi]
-            try:
-                _guard_dev_only(test_weeks)
-            except ValueError:
-                continue
+        train_weeks_set = set(all_weeks[: fold.val_lo])
+        val_weeks_set = set(all_weeks[fold.val_lo : fold.test_lo])
+        test_weeks_set = set(test_weeks)
 
-            train_weeks_set = set(all_weeks[: fold.val_lo])
-            val_weeks_set = set(all_weeks[fold.val_lo : fold.test_lo])
-            test_weeks_set = set(test_weeks)
+        train_csv = csv_df[csv_df["Data"].dt.date.isin(train_weeks_set)].sort_values("Data")
+        val_csv = csv_df[csv_df["Data"].dt.date.isin(val_weeks_set)].sort_values("Data")
+        test_csv = csv_df[csv_df["Data"].dt.date.isin(test_weeks_set)].sort_values("Data")
 
-            train_csv = csv_df[csv_df["Data"].dt.date.isin(train_weeks_set)].sort_values("Data")
-            test_csv = csv_df[csv_df["Data"].dt.date.isin(test_weeks_set)].sort_values("Data")
+        if len(train_csv) < 20 or len(val_csv) == 0 or len(test_csv) == 0:
+            continue
+        missing = [c for c in OLD_ISOFOREST_FEATURES if c not in train_csv.columns]
+        if missing:
+            continue
 
-            if len(train_csv) < 20 or len(test_csv) == 0:
-                continue
+        X_train_iso = train_csv[OLD_ISOFOREST_FEATURES].values
+        X_val_iso = val_csv[OLD_ISOFOREST_FEATURES].values
+        y_val_iso = val_csv["Y"].values.astype(int)
+        X_test_iso = test_csv[OLD_ISOFOREST_FEATURES].values
+        y_test_iso = test_csv["Y"].values.astype(int)
+        test_weeks_aligned: list[date] = [d.date() for d in test_csv["Data"]]
+        val_ku_iso = ku_mask[fold.val_lo : fold.test_lo][
+            [i for i, w in enumerate(all_weeks[fold.val_lo : fold.test_lo]) if w in val_weeks_set]
+        ]
 
-            # Check all required columns exist
-            missing = [c for c in feature_cols if c not in train_csv.columns]
-            if missing:
-                continue
+        iso = IsolationForest(n_estimators=500, contamination="auto", random_state=42)
+        iso.fit(X_train_iso)
 
-            X_train_old = train_csv[feature_cols].values
-            y_train_old = train_csv["Y"].values.astype(int)
-            X_test_old = test_csv[feature_cols].values
-            test_weeks_aligned: list[date] = [d.date() for d in test_csv["Data"]]
-            y_test_old = test_csv["Y"].values.astype(int)
+        # Negate: higher = more anomalous (consistent with anomaly semantics)
+        val_scores_iso = -iso.decision_function(X_val_iso)
+        platt_iso = PlattCalibrator().fit(val_scores_iso, y_val_iso)
+        val_cal_iso = platt_iso.transform(val_scores_iso)
+        thr_iso = choose_threshold(y_val_iso, val_cal_iso, FAR_BUDGET, excluded_mask=val_ku_iso)
 
-            if baseline_name == "old_isoforest":
-                iso = IsolationForest(n_estimators=500, contamination="auto", random_state=42)
-                iso.fit(X_train_old)
-                scores = -iso.decision_function(X_test_old)
-                alerts = (iso.predict(X_test_old) == -1).astype(int)
-                s_range = scores.max() - scores.min()
-                proba = (scores - scores.min()) / (s_range + 1e-9)
-            else:
-                from .pipeline import AnomalyPipeline
+        test_scores_iso = -iso.decision_function(X_test_iso)
+        test_cal_iso = platt_iso.transform(test_scores_iso)
+        test_alerts_iso = (test_cal_iso >= thr_iso).astype(int)
 
-                val_csv = csv_df[csv_df["Data"].dt.date.isin(val_weeks_set)].sort_values("Data")
-                if len(val_csv) == 0:
-                    continue
-                y_val_old = val_csv["Y"].values.astype(int)
-
-                # AnomalyPipeline.fit takes DataFrames
-                train_df = train_csv[feature_cols].copy()
-                val_df = val_csv[feature_cols].copy()
-                test_df = test_csv[feature_cols].copy()
-
-                pipe_old = AnomalyPipeline(calibration="sigmoid")
-                pipe_old.fit(
-                    train_df,
-                    pd.Series(y_train_old),
-                    val_df,
-                    pd.Series(y_val_old),
-                )
-                proba = pipe_old.predict_proba(test_df)[:, 1]
-                alerts = (proba >= 0.5).astype(int)
-
-            fold_results_d.append(
-                FoldResult(
-                    fold_year=fold.test_year,
-                    head="detect",
-                    weeks=test_weeks_aligned,
-                    true_labels=y_test_old,
-                    proba=proba,
-                    alerts=alerts,
-                    threshold=0.5 if baseline_name == "old_ensemble" else 0.0,
-                    platt_a=1.0,
-                    platt_b=0.0,
-                )
+        iso_folds.append(
+            FoldResult(
+                fold_year=fold.test_year,
+                head="detect",
+                weeks=test_weeks_aligned,
+                true_labels=y_test_iso,
+                proba=test_cal_iso,
+                alerts=test_alerts_iso,
+                threshold=thr_iso,
+                platt_a=platt_iso.a,  # type: ignore[arg-type]
+                platt_b=platt_iso.b,  # type: ignore[arg-type]
             )
+        )
+    results["old_isoforest"] = CandidateResult(
+        name="old_isoforest", detect_folds=iso_folds, predict_folds=[], onnx_gate=_gate
+    )
 
-        gate = OnnxGateResult(
-            passed=False, max_diff=None, error="Baseline — ONNX gate not applied."
+    # ── old_ensemble and old_ensemble_native05 ─────────────────────────────────
+    ens_folds: list[FoldResult] = []
+    ens_native_folds: list[FoldResult] = []
+
+    for fold in folds:
+        test_weeks = all_weeks[fold.test_lo : fold.test_hi]
+        try:
+            _guard_dev_only(test_weeks)
+        except ValueError:
+            continue
+
+        train_weeks_set = set(all_weeks[: fold.val_lo])
+        val_weeks_set = set(all_weeks[fold.val_lo : fold.test_lo])
+        test_weeks_set = set(test_weeks)
+
+        train_csv = csv_df[csv_df["Data"].dt.date.isin(train_weeks_set)].sort_values("Data")
+        val_csv = csv_df[csv_df["Data"].dt.date.isin(val_weeks_set)].sort_values("Data")
+        test_csv = csv_df[csv_df["Data"].dt.date.isin(test_weeks_set)].sort_values("Data")
+
+        if len(train_csv) < 20 or len(val_csv) == 0 or len(test_csv) == 0:
+            continue
+        missing = [c for c in FEATURE_COLS if c not in train_csv.columns]
+        if missing:
+            continue
+
+        y_train_ens = train_csv["Y"].values.astype(int)
+        y_val_ens = val_csv["Y"].values.astype(int)
+        y_test_ens = test_csv["Y"].values.astype(int)
+        test_weeks_aligned2: list[date] = [d.date() for d in test_csv["Data"]]
+        val_ku_ens = ku_mask[fold.val_lo : fold.test_lo][
+            [i for i, w in enumerate(all_weeks[fold.val_lo : fold.test_lo]) if w in val_weeks_set]
+        ]
+
+        try:
+            from .pipeline import AnomalyPipeline
+        except ImportError:
+            continue
+
+        train_df = train_csv[FEATURE_COLS].copy()
+        val_df = val_csv[FEATURE_COLS].copy()
+        test_df = test_csv[FEATURE_COLS].copy()
+
+        pipe_ens = AnomalyPipeline(calibration="sigmoid")
+        pipe_ens.fit(train_df, pd.Series(y_train_ens), val_df, pd.Series(y_val_ens))
+
+        test_proba_ens = pipe_ens.predict_proba(test_df)[:, 1]
+
+        # native 0.5
+        ens_native_folds.append(
+            FoldResult(
+                fold_year=fold.test_year,
+                head="detect",
+                weeks=test_weeks_aligned2,
+                true_labels=y_test_ens,
+                proba=test_proba_ens,
+                alerts=(test_proba_ens >= 0.5).astype(int),
+                threshold=0.5,
+                platt_a=1.0,
+                platt_b=0.0,
+            )
         )
-        results[baseline_name] = CandidateResult(
-            name=baseline_name,
-            detect_folds=fold_results_d,
-            predict_folds=[],
-            onnx_gate=gate,
+
+        # outer Platt + choose_threshold policy
+        val_proba_ens = pipe_ens.predict_proba(val_df)[:, 1]
+        platt_ens = PlattCalibrator().fit(val_proba_ens, y_val_ens)
+        val_cal_ens = platt_ens.transform(val_proba_ens)
+        thr_ens = choose_threshold(y_val_ens, val_cal_ens, FAR_BUDGET, excluded_mask=val_ku_ens)
+        test_cal_ens = platt_ens.transform(test_proba_ens)
+        test_alerts_ens = (test_cal_ens >= thr_ens).astype(int)
+
+        ens_folds.append(
+            FoldResult(
+                fold_year=fold.test_year,
+                head="detect",
+                weeks=test_weeks_aligned2,
+                true_labels=y_test_ens,
+                proba=test_cal_ens,
+                alerts=test_alerts_ens,
+                threshold=thr_ens,
+                platt_a=platt_ens.a,  # type: ignore[arg-type]
+                platt_b=platt_ens.b,  # type: ignore[arg-type]
+            )
         )
+
+    results["old_ensemble"] = CandidateResult(
+        name="old_ensemble", detect_folds=ens_folds, predict_folds=[], onnx_gate=_gate
+    )
+    results["old_ensemble_native05"] = CandidateResult(
+        name="old_ensemble_native05",
+        detect_folds=ens_native_folds,
+        predict_folds=[],
+        onnx_gate=_gate,
+    )
 
     return results
