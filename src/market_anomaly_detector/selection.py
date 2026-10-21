@@ -1458,3 +1458,235 @@ def _evaluate_old_baselines(
     )
 
     return results
+
+
+# ── Calibration diagnostic ────────────────────────────────────────────────────
+
+
+def collect_calibration_diagnostics(
+    name: str,
+    make_pipeline_fn: Callable[[], Pipeline],
+    X_df: pd.DataFrame,
+    labels_df: pd.DataFrame,
+    folds: list[FoldSpec],
+    ku_mask: np.ndarray,
+) -> list[dict]:
+    """Re-run the detect-head fold loop and collect per-fold calibration stats.
+
+    Mirrors evaluate_candidate's detect head exactly (same seeds, same core
+    masking) so numbers are identical; returns raw-val-score statistics that
+    FoldResult doesn't store, without touching evaluate_candidate at all.
+    """
+    all_weeks: list[date] = list(labels_df["week"])
+    detect_arr = labels_df["value"].values.astype(int)
+    X_all = X_df.values.astype(float) if hasattr(X_df, "values") else np.asarray(X_df)
+    core_ok = _core_feature_mask(X_df, X_all)
+
+    from .eval_harness import choose_threshold as _choose_thr
+
+    rows: list[dict] = []
+    for fold in folds:
+        test_weeks_all = all_weeks[fold.test_lo : fold.test_hi]
+        try:
+            _guard_dev_only(test_weeks_all)
+        except ValueError:
+            continue
+
+        val_start = all_weeks[fold.val_lo]
+        val_end = all_weeks[fold.test_lo - 1]
+
+        core_train = core_ok[: fold.val_lo]
+        core_val = core_ok[fold.val_lo : fold.test_lo]
+        core_test = core_ok[fold.test_lo : fold.test_hi]
+
+        X_train = X_all[: fold.val_lo][core_train]
+        y_train = detect_arr[: fold.val_lo][core_train]
+        X_val = X_all[fold.val_lo : fold.test_lo][core_val]
+        y_val = detect_arr[fold.val_lo : fold.test_lo][core_val]
+        val_ku = ku_mask[fold.val_lo : fold.test_lo][core_val]
+        X_test = X_all[fold.test_lo : fold.test_hi][core_test]
+
+        if len(X_train) == 0 or len(X_val) == 0 or len(X_test) == 0:
+            continue
+        if len(np.unique(y_train)) < 2:
+            continue
+
+        pipe = make_pipeline_fn()
+        pipe.fit(X_train, y_train)
+
+        val_raw = pipe.predict_proba(X_val)[:, 1]
+        platt = PlattCalibrator().fit(val_raw, y_val)
+        val_cal = platt.transform(val_raw)
+        thr = _choose_thr(y_val, val_cal, FAR_BUDGET, excluded_mask=val_ku)
+
+        test_raw = pipe.predict_proba(X_test)[:, 1]
+        test_cal = platt.transform(test_raw)
+
+        # Achieved calm-week FAR on val (excluding KU, matching choose_threshold)
+        calm_val = (y_val == 0) & (~val_ku.astype(bool))
+        if calm_val.any():
+            val_calm_far = float((val_cal[calm_val] >= thr).mean())
+        else:
+            val_calm_far = float("nan")
+
+        rows.append(
+            {
+                "candidate": name,
+                "fold_year": fold.test_year,
+                "val_start": val_start,
+                "val_end": val_end,
+                "val_pos": int(y_val.sum()),
+                "val_total": int(len(y_val)),
+                "platt_a": float(platt.a),  # type: ignore[arg-type]
+                "platt_b": float(platt.b),  # type: ignore[arg-type]
+                "threshold": float(thr),
+                "raw_val_min": float(np.nanmin(val_raw)),
+                "raw_val_med": float(np.nanmedian(val_raw)),
+                "raw_val_max": float(np.nanmax(val_raw)),
+                "cal_test_min": float(np.nanmin(test_cal)),
+                "cal_test_med": float(np.nanmedian(test_cal)),
+                "cal_test_max": float(np.nanmax(test_cal)),
+                "val_calm_far": val_calm_far,
+            }
+        )
+
+    return rows
+
+
+def write_calibration_diagnostic(
+    out_path: Path,
+    diag_rows: list[dict],
+    old_ens_native_far_rows: list[dict],
+) -> None:
+    """Write docs/reports/<date>-calibration-diagnostic.md."""
+    today = date.today().isoformat()
+
+    def _f(v: float, fmt: str = ".4f") -> str:
+        if math.isnan(v):
+            return "—"
+        if v == float("inf"):
+            return "inf"
+        return format(v, fmt)
+
+    lines: list[str] = [
+        "# Calibration Diagnostic",
+        "",
+        f"Generated: {today}  ",
+        "Candidates: logreg, hgb, twostage  ",
+        f"FAR budget = {FAR_BUDGET:.0%} · detect head · test years {DEV_FIRST_YEAR}–{DEV_LAST_YEAR}  ",
+        "",
+        "---",
+        "",
+        "## Per-fold calibration",
+        "",
+        "| Candidate | Fold | Val window | Val pos / total"
+        " | Platt a | Platt b | Threshold"
+        " | Raw val min | Raw val med | Raw val max"
+        " | Cal test min | Cal test med | Cal test max"
+        " | Val calm FAR |",
+        "|-----------|------|-----------|----------------"
+        "|---------|---------|----------"
+        "|-------------|-------------|-------------"
+        "|--------------|--------------|--------------|--------------|",
+    ]
+
+    for r in diag_rows:
+        lines.append(
+            f"| {r['candidate']} | {r['fold_year']}"
+            f" | {r['val_start']}–{r['val_end']}"
+            f" | {r['val_pos']} / {r['val_total']}"
+            f" | {_f(r['platt_a'])} | {_f(r['platt_b'])} | {_f(r['threshold'])}"
+            f" | {_f(r['raw_val_min'])} | {_f(r['raw_val_med'])} | {_f(r['raw_val_max'])}"
+            f" | {_f(r['cal_test_min'])} | {_f(r['cal_test_med'])} | {_f(r['cal_test_max'])}"
+            f" | {_f(r['val_calm_far'])} |"
+        )
+
+    lines += [
+        "",
+        "---",
+        "",
+        "## old_ensemble_native05 — calm-week FAR on test folds",
+        "",
+        "Threshold = 0.5 (native). Calm weeks exclude known-unlabeled windows.",
+        "",
+        "| Fold | Calm-week FAR (test) |",
+        "|------|---------------------|",
+    ]
+
+    if old_ens_native_far_rows:
+        for r in old_ens_native_far_rows:
+            lines.append(f"| {r['fold_year']} | {_f(r['calm_test_far'])} |")
+    else:
+        lines.append("| — | old CSV not provided; run with --csv to populate |")
+
+    lines.append("")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def run_calibration_diagnostic(
+    session,
+    out_dir: Path,
+    label_set: str = "ews_v1",
+    first_test_year: int = DEV_FIRST_YEAR,
+    last_test_year: int = DEV_LAST_YEAR,
+    csv_path: Path | None = None,
+) -> int:
+    """Load data, collect per-fold calibration stats for all candidates, write report."""
+    from .eval_harness import KNOWN_UNLABELED, make_folds_v2
+    from .features.build import build_from_db
+    from .features.spec import SPEC_V1
+    from .labels import load_labels
+
+    labels_df = load_labels(session, label_set=label_set)
+    if labels_df.empty:
+        print(f"ERROR: no labels for {label_set!r}")
+        return 1
+
+    weeks: list[date] = list(labels_df["week"])
+    feature_df = build_from_db(session, SPEC_V1, weeks, as_of=None)
+
+    ku_mask = np.zeros(len(weeks), dtype=bool)
+    for ks, ke, _ in KNOWN_UNLABELED:
+        for i, w in enumerate(weeks):
+            if ks <= w <= ke:
+                ku_mask[i] = True
+
+    folds = make_folds_v2(
+        weeks,
+        labels_df["value"].values.astype(int),
+        first_test_year=first_test_year,
+        last_test_year=last_test_year,
+    )
+
+    diag_rows: list[dict] = []
+    for cname, factory in CANDIDATES.items():
+        print(f"Calibration diagnostic: {cname} ...")
+        diag_rows.extend(
+            collect_calibration_diagnostics(cname, factory, feature_df, labels_df, folds, ku_mask)
+        )
+
+    # old_ensemble_native05 calm-week test FAR (requires old CSV)
+    old_ens_native_far_rows: list[dict] = []
+    if csv_path is not None and csv_path.exists():
+        old_baselines = _evaluate_old_baselines(labels_df, folds, csv_path, ku_mask)
+        cr = old_baselines.get("old_ensemble_native05")
+        if cr is not None:
+            week_to_ku: dict[date, bool] = {w: bool(ku_mask[i]) for i, w in enumerate(weeks)}
+            for fr in cr.detect_folds:
+                calm = np.array(
+                    [
+                        (int(y) == 0) and not week_to_ku.get(w, False)
+                        for y, w in zip(fr.true_labels, fr.weeks)
+                    ]
+                )
+                far = float(fr.alerts[calm].mean()) if calm.any() else float("nan")
+                old_ens_native_far_rows.append({"fold_year": fr.fold_year, "calm_test_far": far})
+    else:
+        print("old_ensemble_native05 FAR skipped (--csv not provided or not found).")
+
+    today = date.today().isoformat()
+    out_path = out_dir / f"{today}-calibration-diagnostic.md"
+    write_calibration_diagnostic(out_path, diag_rows, old_ens_native_far_rows)
+    print(f"calibration-diagnostic → {out_path}")
+    return 0

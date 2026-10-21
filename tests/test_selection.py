@@ -441,6 +441,106 @@ def test_core_feature_mask_uses_spec_v1_col_names():
     assert mask[2] is np.bool_(False), "Row 2 (spread_10y_3m NaN) should be excluded"
 
 
+# ── Calibration diagnostic ────────────────────────────────────────────────────
+
+
+def test_collect_calibration_diagnostics_shape_and_contract():
+    """collect_calibration_diagnostics returns one row per fold×candidate with valid values.
+
+    Uses a minimal synthetic dataset (no DB) over a 2-fold span.  Checks:
+    - one row per fold
+    - all probability columns in [0, 1]
+    - val_calm_far in [0, 1]
+    - Platt a and b are finite
+    - threshold is finite (or inf when no calm rows)
+    """
+    from market_anomaly_detector.eval_harness import FoldSpec
+    from market_anomaly_detector.selection import (
+        collect_calibration_diagnostics,
+        make_logreg_pipeline,
+    )
+
+    rng = np.random.default_rng(77)
+    n_features = 8
+
+    # Build synthetic labels + feature data spanning 2010–2011 (2 test folds)
+    # with enough positives for make_folds_v2 requirements.
+    # Build manually: 4 years of train/val history + 2 test years
+    years = list(range(2006, 2012))  # 6 years
+    all_weeks: list[date] = []
+    for yr in years:
+        t = date(yr, 1, 3)
+        while t.year == yr:
+            if t.weekday() == 1:
+                all_weeks.append(t)
+            t = t + timedelta(days=1)
+
+    n_weeks = len(all_weeks)
+    detect = np.zeros(n_weeks, dtype=int)
+    # Both train (2006–2007) and later windows need both classes for the pipeline.
+    for i, w in enumerate(all_weeks):
+        if 2006 <= w.year <= 2007:
+            detect[i] = int(rng.random() < 0.15)
+        elif w.year >= 2008:
+            detect[i] = int(rng.random() < 0.30)
+
+    labels_df = pd.DataFrame({"week": all_weeks, "value": detect})
+    X_arr = rng.standard_normal((n_weeks, n_features)).astype(float)
+    X_arr[rng.random((n_weeks, n_features)) < 0.10] = np.nan
+    X_df = pd.DataFrame(X_arr, columns=[f"f{i}" for i in range(n_features)])
+    ku_mask = np.zeros(n_weeks, dtype=bool)
+
+    # Build two folds manually (2010 and 2011 as test years)
+    def _lo(yr: int) -> int:
+        return next(i for i, w in enumerate(all_weeks) if w.year == yr)
+
+    def _hi(yr: int) -> int:
+        idxs = [i for i, w in enumerate(all_weeks) if w.year == yr]
+        return idxs[-1] + 1
+
+    folds = [
+        FoldSpec(
+            test_year=2010,
+            val_lo=_lo(2008),
+            test_lo=_lo(2010),
+            test_hi=_hi(2010),
+            val_start=all_weeks[_lo(2008)],
+            val_end=all_weeks[_lo(2010) - 1],
+            test_start=all_weeks[_lo(2010)],
+            test_end=all_weeks[_hi(2010) - 1],
+        ),
+        FoldSpec(
+            test_year=2011,
+            val_lo=_lo(2008),
+            test_lo=_lo(2011),
+            test_hi=_hi(2011),
+            val_start=all_weeks[_lo(2008)],
+            val_end=all_weeks[_lo(2011) - 1],
+            test_start=all_weeks[_lo(2011)],
+            test_end=all_weeks[_hi(2011) - 1],
+        ),
+    ]
+
+    rows = collect_calibration_diagnostics(
+        "logreg", make_logreg_pipeline, X_df, labels_df, folds, ku_mask
+    )
+
+    assert len(rows) == 2, f"Expected 2 rows (one per fold), got {len(rows)}"
+    fold_years = {r["fold_year"] for r in rows}
+    assert fold_years == {2010, 2011}
+
+    for r in rows:
+        assert r["candidate"] == "logreg"
+        # val_pos <= val_total
+        assert 0 <= r["val_pos"] <= r["val_total"]
+        # Platt params finite
+        assert math.isfinite(r["platt_a"]) and math.isfinite(r["platt_b"])
+        # Calibrated test probabilities in [0,1]
+        assert 0.0 <= r["cal_test_min"] <= r["cal_test_med"] <= r["cal_test_max"] <= 1.0
+        # val calm FAR in [0,1] or nan (no calm rows)
+        assert math.isnan(r["val_calm_far"]) or 0.0 <= r["val_calm_far"] <= 1.0
+
+
 # ── Integration test (requires MAD_TEST_DATABASE_URL) ────────────────────────
 
 
