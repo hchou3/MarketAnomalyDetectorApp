@@ -11,6 +11,7 @@ from datetime import date, timedelta
 import numpy as np
 import pandas as pd
 import pytest
+from scipy.special import expit
 
 from market_anomaly_detector.calibration import PlattCalibrator
 from market_anomaly_detector.episodes import Episode
@@ -108,6 +109,59 @@ def test_platt_threshold_val_only():
     )
     # Sanity: val-only threshold is finite
     assert not math.isinf(thr_val_only)
+
+
+# ── PlattCalibrator log-odds ──────────────────────────────────────────────────
+
+
+def test_platt_log_odds_recovery():
+    """Platt fitted on log-odds recovers a known (a, b) from noisy binary labels.
+
+    Labels are drawn from sigmoid(a_true * logit(p_raw) + b_true), so the
+    MLE estimate should converge to (a_true, b_true) with enough data.
+    """
+    rng = np.random.default_rng(99)
+    n = 2000
+    a_true, b_true = 2.0, -1.0
+
+    # Raw scores as probabilities (skewed, range within (0,1))
+    p_raw = rng.beta(2, 5, n)
+    logit_raw = np.log(p_raw / (1 - p_raw))
+    p_true = expit(a_true * logit_raw + b_true)
+    labels = rng.binomial(1, p_true).astype(float)
+
+    cal = PlattCalibrator().fit(p_raw, labels)
+
+    assert abs(cal.a - a_true) < 0.4, f"a={cal.a:.3f} too far from {a_true}"
+    assert abs(cal.b - b_true) < 0.4, f"b={cal.b:.3f} too far from {b_true}"
+    probs = cal.transform(p_raw)
+    assert probs.min() >= 0.0 and probs.max() <= 1.0
+
+
+def test_platt_saturated_distribution_non_degenerate():
+    """Saturated raw scores (most ≈ 0, a few ≈ 1) give non-degenerate calibrated range.
+
+    HGB/stacking on an imbalanced dataset often saturates: negatives cluster near 0,
+    positives near 1.  Fitting on log-odds handles this correctly; fitting on raw
+    probabilities collapses to near-constant output.
+    """
+    rng = np.random.default_rng(42)
+    n_neg, n_pos = 1800, 200
+
+    # Saturated: negatives ≈ 0 (median ~0.004), positives ≈ 1
+    neg_scores = rng.beta(0.5, 50, n_neg)
+    pos_scores = rng.beta(50, 0.5, n_pos)
+    raw = np.concatenate([neg_scores, pos_scores])
+    labels = np.concatenate([np.zeros(n_neg), np.ones(n_pos)])
+
+    cal = PlattCalibrator().fit(raw, labels)
+    probs = cal.transform(raw)
+
+    assert probs.min() >= 0.0 and probs.max() <= 1.0
+    assert probs.max() - probs.min() > 0.1, (
+        f"Calibrated range too narrow: {probs.max() - probs.min():.4f}"
+    )
+    assert probs[labels == 1].mean() > probs[labels == 0].mean()
 
 
 # ── Event precision / recall / F1 edge cases ─────────────────────────────────

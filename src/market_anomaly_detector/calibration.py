@@ -28,13 +28,18 @@ class PlattCalibrator(BaseEstimator):
         self.a: float | None = None
         self.b: float | None = None
 
+    @staticmethod
+    def _to_logodds(scores: np.ndarray) -> np.ndarray:
+        p = np.clip(np.asarray(scores, dtype=float), 1e-6, 1 - 1e-6)
+        return np.log(p / (1 - p))
+
     def fit(self, scores: np.ndarray, labels: np.ndarray) -> PlattCalibrator:
-        ys = np.asarray(scores, dtype=float)
+        yz = self._to_logodds(scores)
         yt = np.asarray(labels, dtype=float)
 
         def nll(params: np.ndarray) -> float:
             a, b = params
-            p = np.clip(expit(a * ys + b), 1e-15, 1 - 1e-15)
+            p = np.clip(expit(a * yz + b), 1e-15, 1 - 1e-15)
             return -float(np.mean(yt * np.log(p) + (1 - yt) * np.log(1 - p)))
 
         res = minimize(nll, [1.0, 0.0], method="L-BFGS-B")
@@ -44,7 +49,7 @@ class PlattCalibrator(BaseEstimator):
     def transform(self, scores: np.ndarray) -> np.ndarray:
         if self.a is None:
             raise RuntimeError("Call fit() before transform().")
-        return expit(self.a * np.asarray(scores, dtype=float) + self.b)
+        return expit(self.a * self._to_logodds(scores) + self.b)
 
     def fit_transform(self, scores: np.ndarray, labels: np.ndarray) -> np.ndarray:
         return self.fit(scores, labels).transform(scores)
@@ -208,18 +213,44 @@ def onnx_export_with_platt(
     )
     onnx_model.graph.node.append(gather_node)
 
-    # Platt sigmoid: sigmoid(a * prob1 + b)
+    # Platt sigmoid on log-odds: sigmoid(a * logit(clip(prob1, 1e-6, 1-1e-6)) + b)
     a_name, b_name = "__platt_a", "__platt_b"
+    clip_min_name, clip_max_name = "__platt_clip_min", "__platt_clip_max"
+    one_name = "__platt_one"
+
     a_tensor = numpy_helper.from_array(np.array([platt.a], dtype=np.float32), name=a_name)
     b_tensor = numpy_helper.from_array(np.array([platt.b], dtype=np.float32), name=b_name)
-    onnx_model.graph.initializer.extend([a_tensor, b_tensor])
+    clip_min_t = numpy_helper.from_array(np.array(1e-6, dtype=np.float32), name=clip_min_name)
+    clip_max_t = numpy_helper.from_array(np.array(1.0 - 1e-6, dtype=np.float32), name=clip_max_name)
+    one_t = numpy_helper.from_array(np.array(1.0, dtype=np.float32), name=one_name)
+    onnx_model.graph.initializer.extend([a_tensor, b_tensor, clip_min_t, clip_max_t, one_t])
 
+    clip_out = "__platt_clip"
+    log_p_out = "__platt_logp"
+    one_minus_out = "__platt_1mp"
+    log_1mp_out = "__platt_log1mp"
+    logit_out = "__platt_logit"
     mul_out = "__platt_mul"
     add_out = "__platt_add"
     final_out = "calibrated_probability"
 
     onnx_model.graph.node.append(
-        helper.make_node("Mul", inputs=[gather_out, a_name], outputs=[mul_out])
+        helper.make_node(
+            "Clip", inputs=[gather_out, clip_min_name, clip_max_name], outputs=[clip_out]
+        )
+    )
+    onnx_model.graph.node.append(helper.make_node("Log", inputs=[clip_out], outputs=[log_p_out]))
+    onnx_model.graph.node.append(
+        helper.make_node("Sub", inputs=[one_name, clip_out], outputs=[one_minus_out])
+    )
+    onnx_model.graph.node.append(
+        helper.make_node("Log", inputs=[one_minus_out], outputs=[log_1mp_out])
+    )
+    onnx_model.graph.node.append(
+        helper.make_node("Sub", inputs=[log_p_out, log_1mp_out], outputs=[logit_out])
+    )
+    onnx_model.graph.node.append(
+        helper.make_node("Mul", inputs=[logit_out, a_name], outputs=[mul_out])
     )
     onnx_model.graph.node.append(
         helper.make_node("Add", inputs=[mul_out, b_name], outputs=[add_out])

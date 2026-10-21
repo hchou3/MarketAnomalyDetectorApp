@@ -340,7 +340,7 @@ def choose_threshold(
     if len(calm_scores) == 0:
         return float("inf")
 
-    candidates = np.sort(np.unique(calm_scores))[::-1]
+    candidates = np.sort(np.unique(calm_scores))
     for thr in candidates:
         far = float((calm_scores >= thr).mean())
         if far <= far_budget:

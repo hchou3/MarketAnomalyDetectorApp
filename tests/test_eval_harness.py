@@ -321,6 +321,49 @@ def test_choose_threshold_no_feasible_threshold():
     assert math.isinf(thr)
 
 
+def test_choose_threshold_lowest_qualifying_integers():
+    """100 calm scores 0..99, budget 5% → threshold 95, achieved FAR exactly 0.05.
+
+    The bug returned 99 (highest qualifying); the fix returns 95 (lowest qualifying).
+    """
+    yt = np.zeros(100, dtype=int)
+    ys = np.arange(100, dtype=float)
+    thr = choose_threshold(yt, ys, far_budget=0.05)
+    assert thr == pytest.approx(95.0)
+    assert float((ys >= thr).mean()) == pytest.approx(0.05)
+
+
+def test_choose_threshold_ties():
+    """Ties: lowest threshold with FAR <= budget, not highest."""
+    yt = np.zeros(10, dtype=int)
+    ys = np.array([1.0, 1.0, 1.0, 5.0, 5.0, 5.0, 9.0, 9.0, 9.0, 9.0], dtype=float)
+    # budget=0.70: thr=5 gives 7/10=0.70 ≤ 0.70 (lowest qualifying)
+    thr = choose_threshold(yt, ys, far_budget=0.70)
+    assert thr == pytest.approx(5.0)
+    assert float((ys >= thr).mean()) == pytest.approx(0.70)
+
+
+def test_choose_threshold_all_equal():
+    """All-equal calm scores: inf when FAR=1.0 exceeds budget, else that score."""
+    yt = np.zeros(5, dtype=int)
+    ys = np.full(5, 0.5)
+    assert math.isinf(choose_threshold(yt, ys, far_budget=0.05))
+    assert choose_threshold(yt, ys, far_budget=1.0) == pytest.approx(0.5)
+
+
+def test_choose_threshold_excluded_removes_from_both():
+    """Excluded weeks are removed from numerator and denominator (not just numerator)."""
+    yt = np.zeros(10, dtype=int)
+    ys = np.array([0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0])
+    # Exclude the first five; remaining calm scores: [0.6, 0.7, 0.8, 0.9, 1.0]
+    mask = np.array([True, True, True, True, True, False, False, False, False, False])
+    # budget=0.40: 2/5 at thr=0.9 → FAR=0.40 (lowest qualifying)
+    thr = choose_threshold(yt, ys, far_budget=0.40, excluded_mask=mask)
+    assert thr == pytest.approx(0.9)
+    non_exc = ys[~mask]
+    assert float((non_exc >= thr).mean()) == pytest.approx(0.40)
+
+
 # ── baselines ──────────────────────────────────────────────────────────────────
 
 
