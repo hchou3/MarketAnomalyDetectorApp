@@ -642,6 +642,38 @@ def _cmd_baselines(args: argparse.Namespace) -> int:
     return 0
 
 
+# ── calibration-diag ─────────────────────────────────────────────────────────
+
+
+def _cmd_calibration_diag(args: argparse.Namespace) -> int:
+    from pathlib import Path
+
+    from sqlalchemy.orm import Session
+
+    from .db.engine import create_engine
+    from .selection import run_calibration_diagnostic
+
+    out_dir = Path(args.out_dir) if args.out_dir else _REPORTS_DIR
+
+    try:
+        engine = create_engine(url=args.database_url)
+        with Session(engine) as session:
+            _require_db_ready(engine)
+            return run_calibration_diagnostic(
+                session=session,
+                out_dir=out_dir,
+                label_set=args.label_set,
+                first_test_year=args.first_test_year,
+                last_test_year=args.last_test_year,
+                csv_path=Path(args.csv) if args.csv else None,
+            )
+    except SystemExit:
+        raise
+    except Exception as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+
+
 # ── select ────────────────────────────────────────────────────────────────────
 
 
@@ -754,6 +786,41 @@ def main() -> None:
     )
     pb.add_argument("--database-url", default=None, metavar="URL")
 
+    # ── calibration-diag ─────────────────────────────────────────────────────
+    pcd = subparsers.add_parser(
+        "calibration-diag",
+        help=(
+            "Collect per-fold Platt calibration statistics for all candidates "
+            "and write docs/reports/<date>-calibration-diagnostic.md."
+        ),
+    )
+    pcd.add_argument("--label-set", default="ews_v1", metavar="NAME")
+    pcd.add_argument("--database-url", default=None, metavar="URL")
+    pcd.add_argument(
+        "--out-dir",
+        default=None,
+        metavar="DIR",
+        help="Directory to write the report (default: docs/reports/).",
+    )
+    pcd.add_argument(
+        "--first-test-year",
+        type=int,
+        default=2008,
+        metavar="YEAR",
+    )
+    pcd.add_argument(
+        "--last-test-year",
+        type=int,
+        default=2017,
+        metavar="YEAR",
+    )
+    pcd.add_argument(
+        "--csv",
+        default=None,
+        metavar="PATH",
+        help="Path to old EWS CSV to include old_ensemble_native05 FAR (optional).",
+    )
+
     # ── select ────────────────────────────────────────────────────────────────
     ps = subparsers.add_parser(
         "select",
@@ -806,6 +873,8 @@ def main() -> None:
         sys.exit(_cmd_episodes(args))
     elif args.command == "baselines":
         sys.exit(_cmd_baselines(args))
+    elif args.command == "calibration-diag":
+        sys.exit(_cmd_calibration_diag(args))
     elif args.command == "select":
         sys.exit(_cmd_select(args))
     else:
