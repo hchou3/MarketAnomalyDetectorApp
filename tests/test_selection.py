@@ -439,3 +439,129 @@ def test_core_feature_mask_uses_spec_v1_col_names():
     assert mask[0] is np.bool_(True), "Row 0 (all present) should be kept"
     assert mask[1] is np.bool_(False), "Row 1 (sp500_lr_1w NaN) should be excluded"
     assert mask[2] is np.bool_(False), "Row 2 (spread_10y_3m NaN) should be excluded"
+
+
+# ── Integration test (requires MAD_TEST_DATABASE_URL) ────────────────────────
+
+
+@pytest.mark.db
+def test_run_selection_smoke(db_session, tmp_path):
+    """Integration smoke-test: synthetic price + label rows → run_selection.
+
+    Inserts minimal synthetic data for all SPEC_V1 instruments and a short
+    label set, then calls run_selection(n_boot=20) and verifies the report
+    is written with valid VIX level event F1 and all three candidates listed.
+    """
+    from datetime import date, timedelta
+
+    from market_anomaly_detector.db.models import InstrumentRow, LabelRow, PriceRow, SymbolMapRow
+    from market_anomaly_detector.features.spec import SPEC_V1
+    from market_anomaly_detector.selection import run_selection
+
+    # Build the set of instrument_ids needed
+    inst_ids = set()
+    for s in SPEC_V1:
+        inst_ids.add(s.instrument_id)
+        if s.instrument_id_2:
+            inst_ids.add(s.instrument_id_2)
+
+    # Insert instrument rows
+    for iid in inst_ids:
+        db_session.add(
+            InstrumentRow(
+                id=iid,
+                name=iid,
+                asset_class="index",
+                units="index_points",
+                quote="USD",
+                native_frequency="daily",
+            )
+        )
+    db_session.flush()
+
+    # Insert symbol_map so load_prices can find the provider
+    for iid in inst_ids:
+        db_session.add(
+            SymbolMapRow(
+                instrument_id=iid,
+                provider="yahoo",
+                symbol=f"{iid}=X",
+                priority=1,
+                fidelity="eod",
+            )
+        )
+    db_session.flush()
+
+    # Generate daily price rows (2000-01-03 to 2017-12-29, Mon-Fri)
+    rng = np.random.default_rng(7)
+    start_date = date(2000, 1, 3)
+    end_date = date(2017, 12, 29)
+    price_rows = []
+    cur = start_date
+    while cur <= end_date:
+        if cur.weekday() < 5:  # Mon-Fri
+            for iid in inst_ids:
+                # VIX: mean ~20, log-normal; others: random walk
+                base = 20.0 if iid == "vix" else 100.0
+                val = float(base + rng.normal(0, 1))
+                val = max(val, 0.5)
+                price_rows.append(
+                    PriceRow(
+                        instrument_id=iid,
+                        provider="yahoo",
+                        obs_date=cur,
+                        value=val,
+                        known_at=cur,
+                        ingested_at=pd.Timestamp.now(tz="UTC").to_pydatetime(),
+                    )
+                )
+        cur += timedelta(days=1)
+    db_session.bulk_save_objects(price_rows)
+    db_session.flush()
+
+    # Generate weekly label rows (Tuesdays 2004-2017)
+    # Mark ~20% of weeks in 2008-2009 and 2011-2012 as anomalies
+    label_set = "test_ews"
+    tues = date(2004, 1, 6)
+    label_rows = []
+    while tues <= date(2017, 12, 26):
+        yr = tues.year
+        val = 0
+        if (2008 <= yr <= 2009) or (2011 <= yr <= 2012):
+            val = 1 if rng.random() < 0.5 else 0
+        label_rows.append(LabelRow(label_set=label_set, week=tues, value=val, source="test"))
+        tues += timedelta(weeks=1)
+    db_session.bulk_save_objects(label_rows)
+    db_session.flush()
+
+    # Run selection (small n_boot for speed; 2008-2010 only to keep it fast)
+    out_dir = tmp_path / "reports"
+    out_dir.mkdir()
+    rc = run_selection(
+        db_session,
+        out_dir,
+        label_set=label_set,
+        first_test_year=2008,
+        last_test_year=2010,
+        n_boot=20,
+        csv_path=None,
+        skip_bootstrap=False,
+    )
+    assert rc == 0, "run_selection returned non-zero exit code"
+
+    report_files = list(out_dir.glob("*-model-selection.md"))
+    assert report_files, "No model-selection report was written"
+    report = report_files[0].read_text(encoding="utf-8")
+
+    # Report must mention all three candidates
+    for cname in ("logreg", "hgb", "twostage"):
+        assert cname in report, f"Candidate '{cname}' not found in report"
+
+    # VIX level event F1 must be present and not NaN
+    assert "vix_level" in report, "vix_level not in report"
+    assert "not evaluated" not in report.split("vix_level")[1][:50], (
+        "vix_level shows 'not evaluated'"
+    )
+
+    # Bootstrap section must show actual n_boot (20), not hardcoded 2000
+    assert "20 resamples" in report, "Bootstrap heading does not show actual n_boot"

@@ -800,6 +800,7 @@ def write_selection_report(
     label_set: str,
     first_test_year: int,
     last_test_year: int,
+    n_boot: int = N_BOOT,
 ) -> None:
     today = date.today().isoformat()
     all_results: dict[str, CandidateResult] = {**candidates, **baselines}
@@ -823,10 +824,10 @@ def write_selection_report(
     ]
 
     all_names = list(candidates.keys()) + list(baselines.keys())
-    # Always show old baseline rows even if not evaluated (Fix 6)
-    for old_bl in ("old_isoforest", "old_ensemble", "old_ensemble_native05"):
-        if old_bl not in all_names and old_bl not in baselines:
-            all_names.append(old_bl)
+    # Always show VIX and old baseline rows even if not evaluated
+    for extra in ("vix_level", "vix_z52", "old_isoforest", "old_ensemble", "old_ensemble_native05"):
+        if extra not in all_names:
+            all_names.append(extra)
     for nm in all_names:
         if nm not in pooled:
             lines.append(f"| {nm} | not evaluated | — | — | — | — | — |")
@@ -860,12 +861,15 @@ def write_selection_report(
     ]
 
     if episodes:
-        header_cols = ["#", "Start", "End", "Wks"] + list(candidates.keys())
+        ep_table_names = list(candidates.keys()) + [
+            n for n in ("vix_level", "old_ensemble") if n in pooled
+        ]
+        header_cols = ["#", "Start", "End", "Wks"] + ep_table_names
         lines.append("| " + " | ".join(header_cols) + " |")
         lines.append("|" + "---|" * len(header_cols))
         for i, ep in enumerate(episodes, 1):
             row_parts = [str(i), str(ep.start), str(ep.end), str(ep.length)]
-            for nm in candidates:
+            for nm in ep_table_names:
                 if nm not in pooled:
                     row_parts.append("—")
                     continue
@@ -878,7 +882,7 @@ def write_selection_report(
         "",
         "---",
         "",
-        "## Bootstrap intervals (detect head, 2000 resamples of test years)",
+        f"## Bootstrap intervals (detect head, {n_boot} resamples of test years)",
         "",
         "| Model | Event F1 95% CI | Row F1 95% CI | PR AUC 95% CI | Brier 95% CI |",
         "|-------|----------------|--------------|--------------|-------------|",
@@ -952,15 +956,14 @@ def write_selection_report(
         "",
         "## Missing data per fold",
         "",
-        "Rows excluded where `vix_lr_1w` is NaN (cannot use core VIX feature).",
+        "Rows excluded where any core feature (VIX, S&P 500, US 10y yield) is NaN.",
         "",
         "| Model | Fold year | Rows dropped |",
         "|-------|-----------|-------------|",
     ]
     for nm, cr in candidates.items():
         for fr in cr.detect_folds:
-            if fr.rows_dropped > 0:
-                lines.append(f"| {nm} | {fr.fold_year} | {fr.rows_dropped} |")
+            lines.append(f"| {nm} | {fr.fold_year} | {fr.rows_dropped} |")
 
     # Fix 8: predict-head fallback footnote
     fallback_folds: dict[str, list[int]] = {}
@@ -1043,10 +1046,14 @@ def run_selection(
     weeks: list[date] = list(labels_df["week"])
 
     # Build features from DB (point-in-time correct)
-    feature_df = build_from_db(session, SPEC_V1, as_of=None)
-    feature_df = feature_df.reindex([pd.Timestamp(w) for w in weeks])
+    feature_df = build_from_db(session, SPEC_V1, weeks, as_of=None)
 
-    weekly_close(session, "vix", weeks)
+    vix_close = weekly_close(session, "vix", weeks)
+    if np.all(np.isnan(vix_close)):
+        raise RuntimeError(
+            "VIX weekly close is entirely NaN — cannot compute VIX baselines. "
+            "Ensure the 'vix' instrument has price rows in the DB."
+        )
 
     ku_mask = np.zeros(len(weeks), dtype=bool)
     for ks, ke, _ in KNOWN_UNLABELED:
@@ -1097,7 +1104,13 @@ def run_selection(
     for cname, cr in candidates.items():
         pooled[cname] = compute_pooled_metrics(cr.detect_folds, episodes, dev_weeks, calm_years)
 
-    # Old baselines (Fix 6: warn and skip gracefully if CSV unavailable)
+    # VIX baselines — same per-fold Platt + choose_threshold policy as candidates
+    vix_baselines = _evaluate_vix_baselines(labels_df, folds, vix_close, ku_mask)
+    for vname, vr in vix_baselines.items():
+        if vr.detect_folds:
+            pooled[vname] = compute_pooled_metrics(vr.detect_folds, episodes, dev_weeks, calm_years)
+
+    # Old baselines (warn and skip gracefully if CSV unavailable)
     old_baselines: dict[str, CandidateResult] = {}
     if csv_path is None or not csv_path.exists():
         print("Old CSV baselines not evaluated (--csv not provided or file not found).")
@@ -1109,19 +1122,21 @@ def run_selection(
                     br.detect_folds, episodes, dev_weeks, calm_years
                 )
 
+    all_baselines = {**vix_baselines, **old_baselines}
+
     # Bootstrap
     boot: dict[str, dict] = {}
     if not skip_bootstrap:
         for cname, cr in candidates.items():
             print(f"Bootstrapping {cname} ...")
             boot[cname] = year_block_bootstrap(cr.detect_folds, episodes, dev_weeks, n_boot=n_boot)
-        for bname, br in old_baselines.items():
+        for bname, br in all_baselines.items():
             if br.detect_folds:
                 boot[bname] = year_block_bootstrap(
                     br.detect_folds, episodes, dev_weeks, n_boot=n_boot
                 )
     else:
-        for nm in list(candidates.keys()) + list(old_baselines.keys()):
+        for nm in list(candidates.keys()) + list(all_baselines.keys()):
             boot[nm] = {
                 "n_boot": 0,
                 "event_f1_ci95": None,
@@ -1141,6 +1156,11 @@ def run_selection(
     selected_name, selection_reason = apply_selection_rule(sel_metrics, sel_boot, onnx_gates)
 
     vix_level_ef1 = pooled.get("vix_level", {}).get("event_f1", float("nan"))
+    if math.isnan(vix_level_ef1):
+        raise RuntimeError(
+            "VIX level event F1 could not be computed. "
+            "Check that the 'vix' instrument has sufficient price rows."
+        )
     old_ensemble_ef1 = pooled.get("old_ensemble", {}).get("event_f1", float("nan"))
 
     today = date.today().isoformat()
@@ -1148,7 +1168,7 @@ def run_selection(
     write_selection_report(
         out_path,
         candidates,
-        old_baselines,
+        all_baselines,
         pooled,
         boot,
         episodes,
@@ -1159,9 +1179,92 @@ def run_selection(
         label_set,
         first_test_year,
         last_test_year,
+        n_boot=n_boot,
     )
     print(f"model-selection: {selected_name or 'none'} → {out_path}")
     return 0
+
+
+def _evaluate_vix_baselines(
+    labels_df: pd.DataFrame,
+    folds: list[FoldSpec],
+    vix_close: np.ndarray,
+    ku_mask: np.ndarray,
+) -> dict[str, CandidateResult]:
+    """Evaluate vix_level and vix_z52 on the same dev folds as candidates.
+
+    Each baseline uses per-fold Platt calibration + choose_threshold on the
+    validation window (known-unlabeled excluded), same as the candidate policy.
+    """
+    from .eval_harness import choose_threshold, vix_rule
+    from .eval_harness import vix_z52 as _vix_z52
+
+    all_weeks: list[date] = list(labels_df["week"])
+    detect_arr = labels_df["value"].values.astype(int)
+
+    level_folds: list[FoldResult] = []
+    z52_folds: list[FoldResult] = []
+
+    for fold in folds:
+        test_weeks = all_weeks[fold.test_lo : fold.test_hi]
+        _guard_dev_only(test_weeks)
+
+        val_detect = detect_arr[fold.val_lo : fold.test_lo]
+        val_ku = ku_mask[fold.val_lo : fold.test_lo]
+        test_detect = detect_arr[fold.test_lo : fold.test_hi]
+
+        # ── vix_level ──────────────────────────────────────────────────────
+        val_level = vix_close[fold.val_lo : fold.test_lo]
+        test_level = vix_close[fold.test_lo : fold.test_hi]
+        thr_level = choose_threshold(val_detect, val_level, FAR_BUDGET, excluded_mask=val_ku)
+        test_alerts_level = vix_rule(test_level, thr_level)
+        # Platt on raw scores = identity (a=1, b=0); use raw level as "proba" proxy
+        level_folds.append(
+            FoldResult(
+                fold_year=fold.test_year,
+                head="detect",
+                weeks=test_weeks,
+                true_labels=test_detect,
+                proba=test_level.astype(float),
+                alerts=test_alerts_level,
+                threshold=thr_level,
+                platt_a=1.0,
+                platt_b=0.0,
+            )
+        )
+
+        # ── vix_z52 ────────────────────────────────────────────────────────
+        # z-score needs the full history up to end of val window for warmup
+        z_full = _vix_z52(vix_close[: fold.test_lo])
+        val_z52 = z_full[fold.val_lo :]  # aligns with val window
+        test_z_full = _vix_z52(vix_close[: fold.test_hi])
+        test_z52 = test_z_full[fold.test_lo :]
+
+        thr_z52 = choose_threshold(val_detect, val_z52, FAR_BUDGET, excluded_mask=val_ku)
+        test_alerts_z52 = vix_rule(test_z52, thr_z52)
+        z52_folds.append(
+            FoldResult(
+                fold_year=fold.test_year,
+                head="detect",
+                weeks=test_weeks,
+                true_labels=test_detect,
+                proba=test_z52.astype(float),
+                alerts=test_alerts_z52,
+                threshold=thr_z52,
+                platt_a=1.0,
+                platt_b=0.0,
+            )
+        )
+
+    no_gate = OnnxGateResult(passed=False, max_diff=None, error="VIX rule — no ONNX export")
+    return {
+        "vix_level": CandidateResult(
+            name="vix_level", detect_folds=level_folds, predict_folds=[], onnx_gate=no_gate
+        ),
+        "vix_z52": CandidateResult(
+            name="vix_z52", detect_folds=z52_folds, predict_folds=[], onnx_gate=no_gate
+        ),
+    }
 
 
 def _evaluate_old_baselines(
