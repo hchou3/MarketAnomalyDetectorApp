@@ -363,24 +363,48 @@ except ImportError:
     ONNX_AVAILABLE = False
 
 
+def _make_saturated_rows(
+    n: int, n_features: int, seed: int, nan_frac: float = 0.15
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return (X_sat, y_sat) with extreme feature values that saturate float32 sigmoid.
+
+    Scaling standard normals by 20 drives logistic decision_function beyond ±14,
+    where sigmoid(14) = 1.0 exactly in float32 — the case that broke the old logit path.
+    """
+    rng = np.random.default_rng(seed)
+    X_sat = (rng.standard_normal((n, n_features)) * 20).astype(np.float32)
+    X_sat[rng.random((n, n_features)) < nan_frac] = np.nan
+    y_sat = (np.nan_to_num(X_sat[:, 0]) > 0).astype(int)
+    return X_sat, y_sat
+
+
 @pytest.mark.skipif(not ONNX_AVAILABLE, reason="skl2onnx/onnxruntime not installed")
 def test_onnx_parity_logreg():
-    """LogReg + MedianImputeWithIndicator + Platt: parity ≤1e-5, 500 rows 15% NaN."""
+    """LogReg + MedianImputeWithIndicator + Platt: parity ≤1e-5, ≥500 rows 15% NaN.
+
+    Uses decision_function (raw margin) for the Platt input to avoid float32
+    saturation: sigmoid(14.0) rounds to 1.0 in float32, so logit(1.0 - ε) ≠ 14.0.
+    Validation set includes 75 saturated rows (features scaled ×20) to exercise
+    the exact regime that caused the 1.48e-4 failure before this fix.
+    """
     from market_anomaly_detector.selection import check_onnx_gate, make_logreg_pipeline
 
     X, y = _make_synthetic_data(500, 10, nan_frac=0.15)
     n_features = X.shape[1]
+    X_train, y_train = X[:400], y[:400]
 
-    X_train, X_val = X[:400], X[400:]
-    y_train, y_val = y[:400], y[400:]
+    # Parity check: all 500 normal rows + 75 saturated rows (575 total, ≥500)
+    X_sat, y_sat = _make_saturated_rows(75, n_features, seed=99)
+    X_check = np.concatenate([X, X_sat])
+    y_check = np.concatenate([y, y_sat])
 
     pipe = make_logreg_pipeline()
     pipe.fit(X_train, y_train)
 
-    val_raw = pipe.predict_proba(X_val)[:, 1]
-    platt = PlattCalibrator().fit(val_raw, y_val)
+    val_raw = pipe.decision_function(X_check)
+    platt = PlattCalibrator(use_logit=False).fit(val_raw, y_check)
 
-    gate = check_onnx_gate("logreg", pipe, platt, X_val, n_features)
+    gate = check_onnx_gate("logreg", pipe, platt, X_check, n_features)
 
     assert gate.passed, f"LogReg ONNX gate failed: {gate.error}"
     assert gate.max_diff is not None
@@ -389,26 +413,31 @@ def test_onnx_parity_logreg():
 
 @pytest.mark.skipif(not ONNX_AVAILABLE, reason="skl2onnx/onnxruntime not installed")
 def test_onnx_parity_hgb():
-    """HGB + Platt exports to ONNX and matches sklearn within 1e-5, 500 rows 15% NaN.
+    """HGB + Platt exports to ONNX and matches sklearn within 1e-5, ≥500 rows 15% NaN.
 
+    Uses decision_function (raw margin) for the Platt input (same fix as logreg).
     The HGB shim in calibration.py casts nodes_missing_value_tracks_true to int,
     fixing the skl2onnx 1.20 / onnx 1.23 incompatibility.
+    Validation set includes 75 saturated rows to exercise float32-saturation regime.
     """
     from market_anomaly_detector.selection import check_onnx_gate, make_hgb_pipeline
 
     X, y = _make_synthetic_data(500, 10, nan_frac=0.15)
     n_features = X.shape[1]
+    X_train, y_train = X[:400], y[:400]
 
-    X_train, X_val = X[:400], X[400:]
-    y_train, y_val = y[:400], y[400:]
+    # Parity check: all 500 normal rows + 75 saturated rows (575 total, ≥500)
+    X_sat, y_sat = _make_saturated_rows(75, n_features, seed=99)
+    X_check = np.concatenate([X, X_sat])
+    y_check = np.concatenate([y, y_sat])
 
     pipe = make_hgb_pipeline()
     pipe.fit(X_train, y_train)
 
-    val_raw = pipe.predict_proba(X_val)[:, 1]
-    platt = PlattCalibrator().fit(val_raw, y_val)
+    val_raw = pipe.decision_function(X_check)
+    platt = PlattCalibrator(use_logit=False).fit(val_raw, y_check)
 
-    gate = check_onnx_gate("hgb", pipe, platt, X_val, n_features)
+    gate = check_onnx_gate("hgb", pipe, platt, X_check, n_features)
 
     assert gate.passed, f"HGB ONNX gate failed: {gate.error}"
     assert gate.max_diff is not None

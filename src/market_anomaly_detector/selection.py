@@ -38,6 +38,7 @@ from .eval_harness import (
     choose_threshold,
     detect_event_results,
     false_alarm_runs,
+    predict_event_results,
     row_metrics,
 )
 
@@ -252,6 +253,14 @@ CANDIDATES: dict[str, Callable[[], Pipeline]] = {
     "twostage": make_twostage_pipeline,
 }
 SIMPLICITY_ORDER = ["logreg", "hgb", "twostage"]
+
+# logreg and hgb expose decision_function (raw log-odds); twostage uses predict_proba.
+# PlattCalibrator(use_logit=False) fits on the raw margin directly — no saturation risk.
+_CANDIDATE_USES_LOGIT: dict[str, bool] = {
+    "logreg": False,
+    "hgb": False,
+    "twostage": True,
+}
 
 
 # ── ONNX helpers ─────────────────────────────────────────────────────────────
@@ -469,7 +478,10 @@ def check_onnx_gate(
         X_f32 = X_sample.astype(np.float32)
         ort_probs = sess.run(["calibrated_probability"], {input_name: X_f32})[0].flatten()
 
-        sklearn_raw = pipeline.predict_proba(X_sample)[:, 1]
+        if platt.use_logit:
+            sklearn_raw = pipeline.predict_proba(X_sample)[:, 1]
+        else:
+            sklearn_raw = pipeline.decision_function(X_sample)
         sklearn_probs = platt.transform(sklearn_raw)
 
         max_diff = float(np.max(np.abs(ort_probs - sklearn_probs.astype(np.float32))))
@@ -560,6 +572,8 @@ def evaluate_candidate(
     detect_folds: list[FoldResult] = []
     predict_folds: list[FoldResult] = []
 
+    use_logit = _CANDIDATE_USES_LOGIT.get(name, True)
+
     last_pipe_d: Pipeline | None = None
     last_platt_d: PlattCalibrator | None = None
 
@@ -594,12 +608,18 @@ def evaluate_candidate(
         pipe_d = make_pipeline_fn()
         pipe_d.fit(X_train, y_train_det)
 
-        val_raw_d = pipe_d.predict_proba(X_val)[:, 1]
-        platt_d = PlattCalibrator().fit(val_raw_d, y_val_det)
+        if use_logit:
+            val_raw_d = pipe_d.predict_proba(X_val)[:, 1]
+        else:
+            val_raw_d = pipe_d.decision_function(X_val)
+        platt_d = PlattCalibrator(use_logit=use_logit).fit(val_raw_d, y_val_det)
         val_cal_d = platt_d.transform(val_raw_d)
         thr_d = choose_threshold(y_val_det, val_cal_d, FAR_BUDGET, excluded_mask=val_ku)
 
-        test_raw_d = pipe_d.predict_proba(X_test)[:, 1]
+        if use_logit:
+            test_raw_d = pipe_d.predict_proba(X_test)[:, 1]
+        else:
+            test_raw_d = pipe_d.decision_function(X_test)
         test_cal_d = platt_d.transform(test_raw_d)
         test_alerts_d = (test_cal_d >= thr_d).astype(int)
 
@@ -643,7 +663,10 @@ def evaluate_candidate(
         pipe_p.fit(X_train_pred, y_train_pred)
 
         if len(y_val_pred) < 4 or len(np.unique(y_val_pred)) < 2:
-            test_raw_p = pipe_p.predict_proba(X_test_pred)[:, 1]
+            if use_logit:
+                test_raw_p = pipe_p.predict_proba(X_test_pred)[:, 1]
+            else:
+                test_raw_p = pipe_p.decision_function(X_test_pred)
             predict_folds.append(
                 FoldResult(
                     fold_year=fold.test_year,
@@ -651,8 +674,8 @@ def evaluate_candidate(
                     weeks=test_weeks_pred,
                     true_labels=y_test_pred,
                     proba=test_raw_p,
-                    alerts=(test_raw_p >= 0.5).astype(int),
-                    threshold=0.5,
+                    alerts=(test_raw_p >= 0.0 if not use_logit else test_raw_p >= 0.5).astype(int),
+                    threshold=0.0 if not use_logit else 0.5,
                     platt_a=1.0,
                     platt_b=0.0,
                     score_status="single_class_val",
@@ -660,12 +683,18 @@ def evaluate_candidate(
             )
             continue
 
-        val_raw_p = pipe_p.predict_proba(X_val_pred)[:, 1]
-        platt_p = PlattCalibrator().fit(val_raw_p, y_val_pred)
+        if use_logit:
+            val_raw_p = pipe_p.predict_proba(X_val_pred)[:, 1]
+        else:
+            val_raw_p = pipe_p.decision_function(X_val_pred)
+        platt_p = PlattCalibrator(use_logit=use_logit).fit(val_raw_p, y_val_pred)
         val_cal_p = platt_p.transform(val_raw_p)
         thr_p = choose_threshold(y_val_pred, val_cal_p, FAR_BUDGET, excluded_mask=val_ku_pred)
 
-        test_raw_p = pipe_p.predict_proba(X_test_pred)[:, 1]
+        if use_logit:
+            test_raw_p = pipe_p.predict_proba(X_test_pred)[:, 1]
+        else:
+            test_raw_p = pipe_p.decision_function(X_test_pred)
         test_cal_p = platt_p.transform(test_raw_p)
         test_alerts_p = (test_cal_p >= thr_p).astype(int)
 
@@ -819,8 +848,8 @@ def write_selection_report(
         "",
         "## Summary table",
         "",
-        "| Model | Event F1 | Episode hits | Row F1 | PR AUC | Brier | ONNX gate |",
-        "|-------|---------|-------------|--------|--------|-------|-----------|",
+        "| Model | Event F1 | Episode hits | Row F1 | PR AUC | Brier | FA calm | FA total | ONNX gate |",
+        "|-------|---------|-------------|--------|--------|-------|---------|---------|-----------|",
     ]
 
     all_names = list(candidates.keys()) + list(baselines.keys())
@@ -830,7 +859,7 @@ def write_selection_report(
             all_names.append(extra)
     for nm in all_names:
         if nm not in pooled:
-            lines.append(f"| {nm} | not evaluated | — | — | — | — | — |")
+            lines.append(f"| {nm} | not evaluated | — | — | — | — | — | — | — |")
             continue
         m = pooled[nm]
         gate = all_results.get(nm)
@@ -845,9 +874,11 @@ def write_selection_report(
         brier = f"{pm.get('brier', float('nan')):.3f}" if pm else "—"
         hits = f"{m['episode_hits']}/{m['episodes_total']}"
         row_f1 = m["row"]["f1"]
+        fa_calm = m.get("fa_calm_runs", "—")
+        fa_total = m.get("fa_total_runs", "—")
         lines.append(
             f"| {nm} | {m['event_f1']:.3f} | {hits} | {row_f1:.3f}"
-            f" | {pr_auc} | {brier} | {gate_str} |"
+            f" | {pr_auc} | {brier} | {fa_calm} | {fa_total} | {gate_str} |"
         )
 
     lines += [
@@ -878,6 +909,75 @@ def write_selection_report(
                 row_parts.append("Y" if hit else "N")
             lines.append("| " + " | ".join(row_parts) + " |")
 
+    # ── Predict-head section ─────────────────────────────────────────────────
+    pred_names = [nm for nm in list(candidates.keys()) + ["vix_level"] if nm in all_results]
+
+    def _pred_row_m(nm: str) -> dict | None:
+        cr = all_results.get(nm)
+        if not cr or not cr.predict_folds:
+            return None
+        yt = np.concatenate([fr.true_labels for fr in cr.predict_folds])
+        ya = np.concatenate([fr.alerts for fr in cr.predict_folds])
+        return row_metrics(yt, ya) if len(yt) > 0 else None
+
+    lines += [
+        "",
+        "---",
+        "",
+        f"## Predict-head metrics (h={HORIZON} weeks)",
+        "",
+        "Row metrics for the h=4 advance-warning head (calm-at-t evaluation).",
+        "",
+        "| Model | Precision | Recall | F1 |",
+        "|-------|-----------|--------|----|",
+    ]
+    for nm in pred_names:
+        rm = _pred_row_m(nm)
+        if rm is None:
+            lines.append(f"| {nm} | — | — | — |")
+        else:
+            lines.append(f"| {nm} | {rm['precision']:.3f} | {rm['recall']:.3f} | {rm['f1']:.3f} |")
+
+    # Per-episode advance warning: alert within h weeks before onset from predict head
+    lines += [
+        "",
+        "### Advance warning (predict-head alert ≤ h weeks before episode onset)",
+        "",
+    ]
+    if episodes:
+        aw_header = ["#", "Start", "Wks"] + pred_names
+        lines.append("| " + " | ".join(aw_header) + " |")
+        lines.append("|" + "---|" * len(aw_header))
+        for i, ep in enumerate(episodes, 1):
+            row_parts = [str(i), str(ep.start), str(ep.length)]
+            for nm in pred_names:
+                cr = all_results.get(nm)
+                if not cr or not cr.predict_folds:
+                    row_parts.append("—")
+                    continue
+                # calm-at-t alert set: predict head fires AND current label is calm
+                all_detect_weeks: dict[date, int] = {}
+                for cr2 in all_results.values():
+                    for fr in cr2.detect_folds:
+                        for w, lbl in zip(fr.weeks, fr.true_labels):
+                            all_detect_weeks[w] = int(lbl)
+                calm_alerts = {
+                    w
+                    for fr in cr.predict_folds
+                    for w, a in zip(fr.weeks, fr.alerts)
+                    if a == 1 and all_detect_weeks.get(w, 1) == 0
+                }
+                ep_results = predict_event_results([ep], calm_alerts, HORIZON)
+                r = ep_results[0]
+                if r.hit and r.weeks_into_episode is not None:
+                    row_parts.append(f"Y (+{r.weeks_into_episode}w)")
+                else:
+                    row_parts.append("N")
+            lines.append("| " + " | ".join(row_parts) + " |")
+
+    def _fmt_ci(ci: list | None) -> str:
+        return f"[{ci[0]:.3f}, {ci[1]:.3f}]" if ci else "—"
+
     lines += [
         "",
         "---",
@@ -892,9 +992,6 @@ def write_selection_report(
         if nm not in boot:
             continue
         b = boot[nm]
-
-        def _fmt_ci(ci: list | None) -> str:
-            return f"[{ci[0]:.3f}, {ci[1]:.3f}]" if ci else "—"
 
         lines.append(
             f"| {nm} | {_fmt_ci(b.get('event_f1_ci95'))} | {_fmt_ci(b.get('row_f1_ci95'))}"
@@ -926,26 +1023,54 @@ def write_selection_report(
         "",
     ]
 
+    def _paired_diff_ci(
+        boot_a: list[float], boot_b: list[float]
+    ) -> tuple[list[float] | None, bool]:
+        if not boot_a or not boot_b or len(boot_a) != len(boot_b):
+            return None, False
+        diffs = np.asarray(boot_a) - np.asarray(boot_b)
+        ci = [float(np.percentile(diffs, 2.5)), float(np.percentile(diffs, 97.5))]
+        distinguishable = ci[0] > 0 or ci[1] < 0
+        return ci, distinguishable
+
     if selected_name:
         winner_ef1 = pooled.get(selected_name, {}).get("event_f1", float("nan"))
-        beats_vix = winner_ef1 > vix_level_ef1
-        beats_ensemble = winner_ef1 > old_ensemble_ef1
         lines.append(f"**Selected model: `{selected_name}`**")
         lines.append("")
         lines.append(f"Reason: {selection_reason}")
         lines.append("")
+
+        sel_ci = boot.get(selected_name, {}).get("event_f1_ci95")
+        sel_boot_vals = boot.get(selected_name, {}).get("_boot_event_f1", [])
+        sel_str = f"{winner_ef1:.3f} {_fmt_ci(sel_ci)}"
+
+        # vs VIX level
+        vix_ci = boot.get("vix_level", {}).get("event_f1_ci95")
+        vix_boot_vals = boot.get("vix_level", {}).get("_boot_event_f1", [])
+        diff_ci_vix, dist_vix = _paired_diff_ci(sel_boot_vals, vix_boot_vals)
+        vix_str = f"{vix_level_ef1:.3f} {_fmt_ci(vix_ci)}"
         lines.append(
-            f"- Beats VIX level rule (event F1 {vix_level_ef1:.3f}): **{'YES' if beats_vix else 'NO'}**"
+            f"- vs VIX level: selected {sel_str} · VIX {vix_str}"
+            f" · paired diff {_fmt_ci(diff_ci_vix)}"
+            f" · statistically distinguishable: **{'YES' if dist_vix else 'NO'}**"
         )
-        lines.append(
-            f"- Beats old ensemble (event F1 {old_ensemble_ef1:.3f}): **{'YES' if beats_ensemble else 'NO'}**"
-        )
-        if not beats_vix:
+        if not dist_vix and winner_ef1 <= vix_level_ef1:
             lines.append("")
             lines.append(
                 "> No candidate beat the VIX level rule on event F1. "
                 "Stop for a decision (plan 2.4)."
             )
+
+        # vs old ensemble
+        ens_ci = boot.get("old_ensemble", {}).get("event_f1_ci95")
+        ens_boot_vals = boot.get("old_ensemble", {}).get("_boot_event_f1", [])
+        diff_ci_ens, dist_ens = _paired_diff_ci(sel_boot_vals, ens_boot_vals)
+        ens_str = f"{old_ensemble_ef1:.3f} {_fmt_ci(ens_ci)}"
+        lines.append(
+            f"- vs old ensemble: selected {sel_str} · old ens {ens_str}"
+            f" · paired diff {_fmt_ci(diff_ci_ens)}"
+            f" · statistically distinguishable: **{'YES' if dist_ens else 'NO'}**"
+        )
     else:
         lines.append("**No model selected.** " + selection_reason)
 
@@ -1261,10 +1386,67 @@ def _evaluate_vix_baselines(
             )
         )
 
+    # ── vix_level predict head ────────────────────────────────────────────────
+    from .labels import build_targets
+
+    targets = build_targets(labels_df, horizon=HORIZON)
+    predict_arr_vix = targets["predict"].values
+
+    level_predict_folds: list[FoldResult] = []
+    for fold in folds:
+        test_weeks = all_weeks[fold.test_lo : fold.test_hi]
+        try:
+            _guard_dev_only(test_weeks)
+        except ValueError:
+            continue
+
+        val_detect = detect_arr[fold.val_lo : fold.test_lo]
+        val_ku = ku_mask[fold.val_lo : fold.test_lo]
+        val_level = vix_close[fold.val_lo : fold.test_lo]
+        test_level = vix_close[fold.test_lo : fold.test_hi]
+
+        val_pred_raw = predict_arr_vix[fold.val_lo : fold.test_lo]
+        test_pred_raw = predict_arr_vix[fold.test_lo : fold.test_hi]
+        val_pred_mask = ~np.isnan(val_pred_raw)
+        test_pred_mask = ~np.isnan(test_pred_raw)
+
+        y_val_pred = val_pred_raw[val_pred_mask].astype(int)
+        if len(y_val_pred) < 4 or len(np.unique(y_val_pred)) < 2:
+            continue
+
+        val_level_pred = val_level[val_pred_mask]
+        val_ku_pred = val_ku[val_pred_mask]
+        test_level_pred = test_level[test_pred_mask]
+        y_test_pred = test_pred_raw[test_pred_mask].astype(int)
+        test_weeks_pred = [w for w, ok in zip(test_weeks, test_pred_mask) if ok]
+
+        thr_pred = choose_threshold(
+            y_val_pred, val_level_pred, FAR_BUDGET, excluded_mask=val_ku_pred
+        )
+        test_alerts_pred = vix_rule(test_level_pred, thr_pred)
+        test_proba_pred = 1.0 / (1.0 + np.exp(-(test_level_pred - thr_pred)))
+
+        level_predict_folds.append(
+            FoldResult(
+                fold_year=fold.test_year,
+                head="predict",
+                weeks=test_weeks_pred,
+                true_labels=y_test_pred,
+                proba=test_proba_pred,
+                alerts=test_alerts_pred,
+                threshold=thr_pred,
+                platt_a=1.0,
+                platt_b=0.0,
+            )
+        )
+
     no_gate = OnnxGateResult(passed=False, max_diff=None, error="VIX rule — no ONNX export")
     return {
         "vix_level": CandidateResult(
-            name="vix_level", detect_folds=level_folds, predict_folds=[], onnx_gate=no_gate
+            name="vix_level",
+            detect_folds=level_folds,
+            predict_folds=level_predict_folds,
+            onnx_gate=no_gate,
         ),
         "vix_z52": CandidateResult(
             name="vix_z52", detect_folds=z52_folds, predict_folds=[], onnx_gate=no_gate
@@ -1511,15 +1693,22 @@ def collect_calibration_diagnostics(
         if len(np.unique(y_train)) < 2:
             continue
 
+        use_logit_diag = _CANDIDATE_USES_LOGIT.get(name, True)
         pipe = make_pipeline_fn()
         pipe.fit(X_train, y_train)
 
-        val_raw = pipe.predict_proba(X_val)[:, 1]
-        platt = PlattCalibrator().fit(val_raw, y_val)
+        if use_logit_diag:
+            val_raw = pipe.predict_proba(X_val)[:, 1]
+        else:
+            val_raw = pipe.decision_function(X_val)
+        platt = PlattCalibrator(use_logit=use_logit_diag).fit(val_raw, y_val)
         val_cal = platt.transform(val_raw)
         thr = _choose_thr(y_val, val_cal, FAR_BUDGET, excluded_mask=val_ku)
 
-        test_raw = pipe.predict_proba(X_test)[:, 1]
+        if use_logit_diag:
+            test_raw = pipe.predict_proba(X_test)[:, 1]
+        else:
+            test_raw = pipe.decision_function(X_test)
         test_cal = platt.transform(test_raw)
 
         # Achieved calm-week FAR on val (excluding KU, matching choose_threshold)
