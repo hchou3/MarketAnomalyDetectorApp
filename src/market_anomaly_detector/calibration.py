@@ -17,24 +17,32 @@ _CONVERTERS_REGISTERED = False
 
 
 class PlattCalibrator(BaseEstimator):
-    """Sigmoid calibration: P(y=1|score) = sigmoid(a * score + b).
+    """Sigmoid calibration: P(y=1|score) = sigmoid(a * z + b).
+
+    When use_logit=True (default): z = logit(clip(score, 1e-6, 1-1e-6)) — for
+    probability inputs in (0, 1) such as predict_proba outputs.
+    When use_logit=False: z = score — for raw margin / decision_function inputs
+    (logreg, HGB) where the score is already in log-odds space.
 
     Fitted by minimising binary cross-entropy (NLL) on (scores, labels).
-    Two parameters make this suitable for windows with >=8 positives;
-    contrast isotonic regression which overfits small windows.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, use_logit: bool = True) -> None:
+        self.use_logit = use_logit
         self.a: float | None = None
         self.b: float | None = None
 
     @staticmethod
-    def _to_logodds(scores: np.ndarray) -> np.ndarray:
+    def _logodds_of_proba(scores: np.ndarray) -> np.ndarray:
         p = np.clip(np.asarray(scores, dtype=float), 1e-6, 1 - 1e-6)
         return np.log(p / (1 - p))
 
+    def _to_input(self, scores: np.ndarray) -> np.ndarray:
+        z = np.asarray(scores, dtype=float)
+        return self._logodds_of_proba(z) if self.use_logit else z
+
     def fit(self, scores: np.ndarray, labels: np.ndarray) -> PlattCalibrator:
-        yz = self._to_logodds(scores)
+        yz = self._to_input(scores)
         yt = np.asarray(labels, dtype=float)
 
         def nll(params: np.ndarray) -> float:
@@ -49,7 +57,7 @@ class PlattCalibrator(BaseEstimator):
     def transform(self, scores: np.ndarray) -> np.ndarray:
         if self.a is None:
             raise RuntimeError("Call fit() before transform().")
-        return expit(self.a * self._to_logodds(scores) + self.b)
+        return expit(self.a * self._to_input(scores) + self.b)
 
     def fit_transform(self, scores: np.ndarray, labels: np.ndarray) -> np.ndarray:
         return self.fit(scores, labels).transform(scores)
@@ -172,6 +180,12 @@ def onnx_export_with_platt(
     The returned model takes a float32 input of shape [N, n_features] and
     outputs a float32 array of shape [N] with calibrated probabilities.
 
+    When platt.use_logit is False (logreg, HGB): exports with raw_scores=True
+    so the ONNX graph uses the model's raw margin directly, matching
+    decision_function in sklearn.  Avoids float32 saturation from sigmoid→logit.
+
+    When platt.use_logit is True (twostage): keeps the Clip+logit+Platt path.
+
     Raises ImportError if skl2onnx or onnxruntime are not installed.
     Raises RuntimeError if the pipeline cannot be converted.
     """
@@ -182,80 +196,105 @@ def onnx_export_with_platt(
     _apply_skl2onnx_shims()
     _register_converters()
 
+    use_logit = platt.use_logit
+
     if X_sample is None:
         X_sample = np.zeros((5, n_features), dtype=np.float32)
 
-    # Use a small sample for shape inference; NaN entries are fine (tracers use shapes only)
     clf_step = pipeline.steps[-1][1]
+    onnx_opts: dict = {"zipmap": False}
+    if not use_logit:
+        onnx_opts["raw_scores"] = True
+
     onnx_model = to_onnx(
         pipeline,
         X_sample[:5].astype(np.float32),
-        options={id(clf_step): {"zipmap": False}},
+        options={id(clf_step): onnx_opts},
         target_opset={"": 17, "ai.onnx.ml": 3},
     )
 
-    # to_onnx with zipmap=False produces: output[0]=labels (int64 [N]),
-    # output[1]=probabilities (float32 [N, 2])
-    prob_output_name = onnx_model.graph.output[1].name
+    # output[1] is probabilities [N,2] (use_logit) or raw class scores [N,2] (not use_logit).
+    # For binary classification both shapes are [N, 2]; Gather(axis=1, index=1) extracts
+    # the class-1 value (probability or raw margin).
+    score_output_name = onnx_model.graph.output[1].name
 
     # Remove existing outputs; nodes that produce them remain in the graph
     while onnx_model.graph.output:
         onnx_model.graph.output.pop()
 
-    # Gather class-1 probability: Gather(probs, index=1, axis=1) → shape [N]
+    # Gather class-1 value → shape [N]
     gather_out = "__platt_gather"
     idx_name = "__platt_idx"
-    # Scalar index (0-D) so Gather reduces the axis → shape [N], not [N, 1]
     idx_tensor = numpy_helper.from_array(np.array(1, dtype=np.int64), name=idx_name)
     onnx_model.graph.initializer.append(idx_tensor)
     gather_node = helper.make_node(
-        "Gather", inputs=[prob_output_name, idx_name], outputs=[gather_out], axis=1
+        "Gather", inputs=[score_output_name, idx_name], outputs=[gather_out], axis=1
     )
     onnx_model.graph.node.append(gather_node)
 
-    # Platt sigmoid on log-odds: sigmoid(a * logit(clip(prob1, 1e-6, 1-1e-6)) + b)
     a_name, b_name = "__platt_a", "__platt_b"
-    clip_min_name, clip_max_name = "__platt_clip_min", "__platt_clip_max"
-    one_name = "__platt_one"
-
     a_tensor = numpy_helper.from_array(np.array([platt.a], dtype=np.float32), name=a_name)
     b_tensor = numpy_helper.from_array(np.array([platt.b], dtype=np.float32), name=b_name)
-    clip_min_t = numpy_helper.from_array(np.array(1e-6, dtype=np.float32), name=clip_min_name)
-    clip_max_t = numpy_helper.from_array(np.array(1.0 - 1e-6, dtype=np.float32), name=clip_max_name)
-    one_t = numpy_helper.from_array(np.array(1.0, dtype=np.float32), name=one_name)
-    onnx_model.graph.initializer.extend([a_tensor, b_tensor, clip_min_t, clip_max_t, one_t])
+    onnx_model.graph.initializer.extend([a_tensor, b_tensor])
 
-    clip_out = "__platt_clip"
-    log_p_out = "__platt_logp"
-    one_minus_out = "__platt_1mp"
-    log_1mp_out = "__platt_log1mp"
-    logit_out = "__platt_logit"
     mul_out = "__platt_mul"
     add_out = "__platt_add"
     final_out = "calibrated_probability"
 
-    onnx_model.graph.node.append(
-        helper.make_node(
-            "Clip", inputs=[gather_out, clip_min_name, clip_max_name], outputs=[clip_out]
+    if not use_logit:
+        # Raw-margin path: sigmoid(a * margin + b).  No logit nodes needed.
+        onnx_model.graph.node.append(
+            helper.make_node("Mul", inputs=[gather_out, a_name], outputs=[mul_out])
         )
-    )
-    onnx_model.graph.node.append(helper.make_node("Log", inputs=[clip_out], outputs=[log_p_out]))
-    onnx_model.graph.node.append(
-        helper.make_node("Sub", inputs=[one_name, clip_out], outputs=[one_minus_out])
-    )
-    onnx_model.graph.node.append(
-        helper.make_node("Log", inputs=[one_minus_out], outputs=[log_1mp_out])
-    )
-    onnx_model.graph.node.append(
-        helper.make_node("Sub", inputs=[log_p_out, log_1mp_out], outputs=[logit_out])
-    )
-    onnx_model.graph.node.append(
-        helper.make_node("Mul", inputs=[logit_out, a_name], outputs=[mul_out])
-    )
-    onnx_model.graph.node.append(
-        helper.make_node("Add", inputs=[mul_out, b_name], outputs=[add_out])
-    )
-    onnx_model.graph.node.append(helper.make_node("Sigmoid", inputs=[add_out], outputs=[final_out]))
+        onnx_model.graph.node.append(
+            helper.make_node("Add", inputs=[mul_out, b_name], outputs=[add_out])
+        )
+        onnx_model.graph.node.append(
+            helper.make_node("Sigmoid", inputs=[add_out], outputs=[final_out])
+        )
+    else:
+        # Logit path: sigmoid(a * logit(clip(prob)) + b).
+        clip_min_name, clip_max_name = "__platt_clip_min", "__platt_clip_max"
+        one_name = "__platt_one"
+        clip_min_t = numpy_helper.from_array(np.array(1e-6, dtype=np.float32), name=clip_min_name)
+        clip_max_t = numpy_helper.from_array(
+            np.array(1.0 - 1e-6, dtype=np.float32), name=clip_max_name
+        )
+        one_t = numpy_helper.from_array(np.array(1.0, dtype=np.float32), name=one_name)
+        onnx_model.graph.initializer.extend([clip_min_t, clip_max_t, one_t])
+
+        clip_out = "__platt_clip"
+        log_p_out = "__platt_logp"
+        one_minus_out = "__platt_1mp"
+        log_1mp_out = "__platt_log1mp"
+        logit_out = "__platt_logit"
+
+        onnx_model.graph.node.append(
+            helper.make_node(
+                "Clip", inputs=[gather_out, clip_min_name, clip_max_name], outputs=[clip_out]
+            )
+        )
+        onnx_model.graph.node.append(
+            helper.make_node("Log", inputs=[clip_out], outputs=[log_p_out])
+        )
+        onnx_model.graph.node.append(
+            helper.make_node("Sub", inputs=[one_name, clip_out], outputs=[one_minus_out])
+        )
+        onnx_model.graph.node.append(
+            helper.make_node("Log", inputs=[one_minus_out], outputs=[log_1mp_out])
+        )
+        onnx_model.graph.node.append(
+            helper.make_node("Sub", inputs=[log_p_out, log_1mp_out], outputs=[logit_out])
+        )
+        onnx_model.graph.node.append(
+            helper.make_node("Mul", inputs=[logit_out, a_name], outputs=[mul_out])
+        )
+        onnx_model.graph.node.append(
+            helper.make_node("Add", inputs=[mul_out, b_name], outputs=[add_out])
+        )
+        onnx_model.graph.node.append(
+            helper.make_node("Sigmoid", inputs=[add_out], outputs=[final_out])
+        )
 
     final_output_info = helper.make_tensor_value_info(final_out, TensorProto.FLOAT, [None])
     onnx_model.graph.output.append(final_output_info)

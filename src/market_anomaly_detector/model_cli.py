@@ -677,6 +677,34 @@ def _cmd_calibration_diag(args: argparse.Namespace) -> int:
 # ── select ────────────────────────────────────────────────────────────────────
 
 
+def _cmd_export_dev_predictions(args: argparse.Namespace) -> int:
+    from pathlib import Path
+
+    from sqlalchemy.orm import Session
+
+    from .db.engine import create_engine
+    from .selection import run_export_dev_predictions
+
+    out_path = Path(args.out) if args.out else Path("artifacts") / "dev_predictions.csv"
+
+    try:
+        engine = create_engine(url=args.database_url)
+        with Session(engine) as session:
+            _require_db_ready(engine)
+            return run_export_dev_predictions(
+                session=session,
+                out_path=out_path,
+                label_set=args.label_set,
+                first_test_year=args.first_test_year,
+                last_test_year=args.last_test_year,
+            )
+    except SystemExit:
+        raise
+    except Exception as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+
+
 def _cmd_select(args: argparse.Namespace) -> int:
     from pathlib import Path
 
@@ -821,6 +849,35 @@ def main() -> None:
         help="Path to old EWS CSV to include old_ensemble_native05 FAR (optional).",
     )
 
+    # ── export-dev-predictions ────────────────────────────────────────────────
+    pexp = subparsers.add_parser(
+        "export-dev-predictions",
+        help=(
+            "Rerun hgb and vix_level on dev folds (same code path as select) and write "
+            "artifacts/dev_predictions.csv with one row per dev week. Read-only."
+        ),
+    )
+    pexp.add_argument("--label-set", default="ews_v1", metavar="NAME")
+    pexp.add_argument("--database-url", default=None, metavar="URL")
+    pexp.add_argument(
+        "--out",
+        default=None,
+        metavar="PATH",
+        help="Output CSV path (default: artifacts/dev_predictions.csv).",
+    )
+    pexp.add_argument(
+        "--first-test-year",
+        type=int,
+        default=2008,
+        metavar="YEAR",
+    )
+    pexp.add_argument(
+        "--last-test-year",
+        type=int,
+        default=2017,
+        metavar="YEAR",
+    )
+
     # ── select ────────────────────────────────────────────────────────────────
     ps = subparsers.add_parser(
         "select",
@@ -875,6 +932,8 @@ def main() -> None:
         sys.exit(_cmd_baselines(args))
     elif args.command == "calibration-diag":
         sys.exit(_cmd_calibration_diag(args))
+    elif args.command == "export-dev-predictions":
+        sys.exit(_cmd_export_dev_predictions(args))
     elif args.command == "select":
         sys.exit(_cmd_select(args))
     else:
