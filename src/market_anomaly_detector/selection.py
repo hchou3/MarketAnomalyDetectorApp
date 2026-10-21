@@ -1310,6 +1310,166 @@ def run_selection(
     return 0
 
 
+def build_export_df(
+    hgb_result: CandidateResult,
+    vix_result: CandidateResult,
+    all_weeks: list[date],
+    vix_close: np.ndarray,
+    ku_mask: np.ndarray,
+    episodes: list[Episode],
+) -> pd.DataFrame:
+    """Assemble per-dev-week DataFrame from hgb and vix_level CandidateResults.
+
+    One row per dev week that appears in at least one detect fold. Weeks dropped
+    by the core-feature mask (hgb only) still appear when covered by vix_level.
+    Columns with no data for a given week are left as NaN / blank.
+    """
+    from datetime import timedelta
+
+    week_to_ku = {w: bool(ku_mask[i]) for i, w in enumerate(all_weeks)}
+    week_to_vix = {w: float(vix_close[i]) for i, w in enumerate(all_weeks)}
+
+    week_to_ep: dict[date, int] = {}
+    for ep_idx, ep in enumerate(episodes, 1):
+        d = ep.start
+        while d <= ep.end:
+            week_to_ep[d] = ep_idx
+            d += timedelta(weeks=1)
+
+    rows: dict[date, dict] = {}
+
+    def _ensure(w: date, fold_year: int, label: int) -> None:
+        if w not in rows:
+            rows[w] = {
+                "week": w,
+                "fold_year": fold_year,
+                "label": label,
+                "episode_id": week_to_ep.get(w, None),
+                "known_unlabeled": int(week_to_ku.get(w, False)),
+                "vix_close": week_to_vix.get(w, float("nan")),
+                "hgb_prob": float("nan"),
+                "hgb_threshold": float("nan"),
+                "hgb_alert": None,
+                "vix_level_prob": float("nan"),
+                "vix_level_threshold": float("nan"),
+                "vix_level_alert": None,
+                "hgb_predict_prob": float("nan"),
+                "hgb_predict_alert": None,
+                "vix_predict_alert": None,
+            }
+
+    for fr in hgb_result.detect_folds:
+        thr = fr.threshold
+        for w, lbl, prob, alert in zip(fr.weeks, fr.true_labels, fr.proba, fr.alerts):
+            _ensure(w, fr.fold_year, int(lbl))
+            rows[w].update(hgb_prob=float(prob), hgb_threshold=float(thr), hgb_alert=int(alert))
+
+    for fr in vix_result.detect_folds:
+        thr = fr.threshold
+        for w, lbl, prob, alert in zip(fr.weeks, fr.true_labels, fr.proba, fr.alerts):
+            _ensure(w, fr.fold_year, int(lbl))
+            rows[w].update(
+                vix_level_prob=float(prob),
+                vix_level_threshold=float(thr),
+                vix_level_alert=int(alert),
+            )
+
+    for fr in hgb_result.predict_folds:
+        for w, prob, alert in zip(fr.weeks, fr.proba, fr.alerts):
+            if w in rows:
+                rows[w].update(hgb_predict_prob=float(prob), hgb_predict_alert=int(alert))
+
+    for fr in vix_result.predict_folds:
+        for w, alert in zip(fr.weeks, fr.alerts):
+            if w in rows:
+                rows[w]["vix_predict_alert"] = int(alert)
+
+    col_order = [
+        "week",
+        "fold_year",
+        "label",
+        "episode_id",
+        "known_unlabeled",
+        "vix_close",
+        "hgb_prob",
+        "hgb_threshold",
+        "hgb_alert",
+        "vix_level_prob",
+        "vix_level_threshold",
+        "vix_level_alert",
+        "hgb_predict_prob",
+        "hgb_predict_alert",
+        "vix_predict_alert",
+    ]
+    df = pd.DataFrame(sorted(rows.values(), key=lambda r: r["week"]))
+    return df[col_order]
+
+
+def run_export_dev_predictions(
+    session,
+    out_path: Path,
+    label_set: str = "ews_v1",
+    first_test_year: int = DEV_FIRST_YEAR,
+    last_test_year: int = DEV_LAST_YEAR,
+) -> int:
+    """Rerun hgb and vix_level on dev folds; write one row per dev week to out_path.
+
+    Uses the exact same code path, seeds, and threshold policy as run_selection.
+    Read-only: does not modify the DB or any report file.
+    """
+    from .episodes import extract_episodes
+    from .eval_harness import make_folds_v2
+    from .features.build import build_from_db, weekly_close
+    from .features.spec import SPEC_V1
+    from .labels import load_labels
+
+    labels_df = load_labels(session, label_set=label_set)
+    if labels_df.empty:
+        print(f"ERROR: no labels for {label_set!r}")
+        return 1
+
+    weeks: list[date] = list(labels_df["week"])
+    feature_df = build_from_db(session, SPEC_V1, weeks, as_of=None)
+    vix_close = weekly_close(session, "vix", weeks)
+
+    ku_mask = np.zeros(len(weeks), dtype=bool)
+    for ks, ke, _ in KNOWN_UNLABELED:
+        for i, w in enumerate(weeks):
+            if ks <= w <= ke:
+                ku_mask[i] = True
+
+    folds = make_folds_v2(
+        weeks,
+        labels_df["value"].values.astype(int),
+        first_test_year=first_test_year,
+        last_test_year=last_test_year,
+    )
+
+    ep2 = extract_episodes(labels_df, merge_gap=2)
+    dev_start = date(first_test_year, 1, 1)
+    dev_end = date(last_test_year, 12, 31)
+    episodes = [e for e in ep2 if dev_start <= e.start <= dev_end]
+
+    print("export-dev-predictions: evaluating hgb ...")
+    hgb_result = evaluate_candidate("hgb", CANDIDATES["hgb"], feature_df, labels_df, folds, ku_mask)
+    print("export-dev-predictions: evaluating vix_level ...")
+    vix_baselines = _evaluate_vix_baselines(labels_df, folds, vix_close, ku_mask)
+    vix_result = vix_baselines["vix_level"]
+
+    df = build_export_df(hgb_result, vix_result, weeks, vix_close, ku_mask, episodes)
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(out_path, index=False)
+    n_hgb = int((df["hgb_alert"] == 1).sum())
+    n_vix = int((df["vix_level_alert"] == 1).sum())
+    print(
+        f"export-dev-predictions: {len(df)} dev weeks"
+        f" | hgb alerts={n_hgb} vix_level alerts={n_vix}"
+        f" → {out_path}"
+    )
+    return 0
+
+
 def _evaluate_vix_baselines(
     labels_df: pd.DataFrame,
     folds: list[FoldSpec],

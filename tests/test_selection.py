@@ -758,3 +758,151 @@ def test_run_selection_smoke(db_session, tmp_path):
 
     # Bootstrap section must show actual n_boot (20), not hardcoded 2000
     assert "20 resamples" in report, "Bootstrap heading does not show actual n_boot"
+
+
+# ── export-dev-predictions ────────────────────────────────────────────────────
+
+
+def test_export_alerts_match_select():
+    """build_export_df alert columns must exactly match evaluate_candidate fold results.
+
+    Calls evaluate_candidate("hgb") and _evaluate_vix_baselines() on synthetic
+    data, then calls build_export_df() with the same inputs and verifies that
+    the alert sets in the CSV are identical to what the FoldResults contain —
+    i.e., the CSV assembly code is consistent with the selection code path.
+    """
+    from market_anomaly_detector.episodes import extract_episodes
+    from market_anomaly_detector.eval_harness import FoldSpec
+    from market_anomaly_detector.selection import (
+        CANDIDATES,
+        _evaluate_vix_baselines,
+        build_export_df,
+        evaluate_candidate,
+    )
+
+    rng = np.random.default_rng(55)
+    n_features = 8
+
+    years = list(range(2006, 2012))
+    all_weeks: list[date] = []
+    for yr in years:
+        t = date(yr, 1, 3)
+        while t.year == yr:
+            if t.weekday() == 1:
+                all_weeks.append(t)
+            t += timedelta(days=1)
+
+    n_weeks = len(all_weeks)
+    detect = np.zeros(n_weeks, dtype=int)
+    for i, w in enumerate(all_weeks):
+        if 2006 <= w.year <= 2007:
+            detect[i] = int(rng.random() < 0.15)
+        elif w.year >= 2008:
+            detect[i] = int(rng.random() < 0.30)
+
+    labels_df = pd.DataFrame({"week": all_weeks, "value": detect})
+    X_arr = rng.standard_normal((n_weeks, n_features)).astype(float)
+    X_arr[rng.random((n_weeks, n_features)) < 0.10] = np.nan
+    X_df = pd.DataFrame(X_arr, columns=[f"f{i}" for i in range(n_features)])
+    ku_mask = np.zeros(n_weeks, dtype=bool)
+    vix_close = rng.uniform(10.0, 40.0, n_weeks)
+
+    def _lo(yr: int) -> int:
+        return next(i for i, w in enumerate(all_weeks) if w.year == yr)
+
+    def _hi(yr: int) -> int:
+        idxs = [i for i, w in enumerate(all_weeks) if w.year == yr]
+        return idxs[-1] + 1
+
+    folds = [
+        FoldSpec(
+            test_year=2010,
+            val_lo=_lo(2008),
+            test_lo=_lo(2010),
+            test_hi=_hi(2010),
+            val_start=all_weeks[_lo(2008)],
+            val_end=all_weeks[_lo(2010) - 1],
+            test_start=all_weeks[_lo(2010)],
+            test_end=all_weeks[_hi(2010) - 1],
+        ),
+        FoldSpec(
+            test_year=2011,
+            val_lo=_lo(2008),
+            test_lo=_lo(2011),
+            test_hi=_hi(2011),
+            val_start=all_weeks[_lo(2008)],
+            val_end=all_weeks[_lo(2011) - 1],
+            test_start=all_weeks[_lo(2011)],
+            test_end=all_weeks[_hi(2011) - 1],
+        ),
+    ]
+
+    dev_start, dev_end = date(2010, 1, 1), date(2011, 12, 31)
+    episodes = [
+        e for e in extract_episodes(labels_df, merge_gap=2) if dev_start <= e.start <= dev_end
+    ]
+
+    hgb_result = evaluate_candidate("hgb", CANDIDATES["hgb"], X_df, labels_df, folds, ku_mask)
+    vix_baselines = _evaluate_vix_baselines(labels_df, folds, vix_close, ku_mask)
+    vix_result = vix_baselines["vix_level"]
+
+    df = build_export_df(hgb_result, vix_result, all_weeks, vix_close, ku_mask, episodes)
+
+    # ── schema checks ─────────────────────────────────────────────────────────
+    expected_cols = {
+        "week",
+        "fold_year",
+        "label",
+        "episode_id",
+        "known_unlabeled",
+        "vix_close",
+        "hgb_prob",
+        "hgb_threshold",
+        "hgb_alert",
+        "vix_level_prob",
+        "vix_level_threshold",
+        "vix_level_alert",
+        "hgb_predict_prob",
+        "hgb_predict_alert",
+        "vix_predict_alert",
+    }
+    assert expected_cols.issubset(set(df.columns)), (
+        f"Missing columns: {expected_cols - set(df.columns)}"
+    )
+    assert df["week"].is_unique, "Duplicate weeks in export"
+    assert all(dev_start <= w <= dev_end for w in df["week"]), "Week outside dev window"
+
+    # ── alert parity: hgb detect ──────────────────────────────────────────────
+    export_hgb = set(df[df["hgb_alert"] == 1]["week"])
+    fold_hgb = {w for fr in hgb_result.detect_folds for w, a in zip(fr.weeks, fr.alerts) if a == 1}
+    assert export_hgb == fold_hgb, f"HGB detect alert mismatch: {export_hgb ^ fold_hgb}"
+
+    # ── alert parity: vix_level detect ────────────────────────────────────────
+    export_vix = set(df[df["vix_level_alert"] == 1]["week"])
+    fold_vix = {w for fr in vix_result.detect_folds for w, a in zip(fr.weeks, fr.alerts) if a == 1}
+    assert export_vix == fold_vix, f"VIX detect alert mismatch: {export_vix ^ fold_vix}"
+
+    # ── alert parity: hgb predict ─────────────────────────────────────────────
+    export_hgb_pred = set(df[df["hgb_predict_alert"] == 1]["week"])
+    fold_hgb_pred = {
+        w for fr in hgb_result.predict_folds for w, a in zip(fr.weeks, fr.alerts) if a == 1
+    }
+    assert export_hgb_pred == fold_hgb_pred, (
+        f"HGB predict alert mismatch: {export_hgb_pred ^ fold_hgb_pred}"
+    )
+
+    # ── alert parity: vix predict ─────────────────────────────────────────────
+    export_vix_pred = set(df[df["vix_predict_alert"] == 1]["week"])
+    fold_vix_pred = {
+        w for fr in vix_result.predict_folds for w, a in zip(fr.weeks, fr.alerts) if a == 1
+    }
+    assert export_vix_pred == fold_vix_pred, (
+        f"VIX predict alert mismatch: {export_vix_pred ^ fold_vix_pred}"
+    )
+
+    # ── thresholds and probabilities ──────────────────────────────────────────
+    # Rows with hgb_alert set must have a valid (non-NaN) hgb_prob and threshold
+    hgb_rows = df[df["hgb_alert"].notna()]
+    assert hgb_rows["hgb_prob"].notna().all(), "Some HGB rows have NaN prob but non-null alert"
+    assert hgb_rows["hgb_threshold"].notna().all(), "Some HGB rows have NaN threshold"
+    assert (hgb_rows["hgb_prob"].between(0.0, 1.0)).all(), "HGB probs outside [0, 1]"
