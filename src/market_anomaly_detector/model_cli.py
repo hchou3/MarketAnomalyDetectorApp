@@ -683,20 +683,65 @@ def _cmd_export_dev_predictions(args: argparse.Namespace) -> int:
     from sqlalchemy.orm import Session
 
     from .db.engine import create_engine
-    from .selection import run_export_dev_predictions
 
+    variant = getattr(args, "variant", None)
     out_path = Path(args.out) if args.out else Path("artifacts") / "dev_predictions.csv"
 
     try:
         engine = create_engine(url=args.database_url)
         with Session(engine) as session:
             _require_db_ready(engine)
-            return run_export_dev_predictions(
+            if variant:
+                from .hgb_experiments import run_export_hgb_variant
+
+                return run_export_hgb_variant(
+                    session=session,
+                    out_path=out_path,
+                    variant_name=variant,
+                    label_set=args.label_set,
+                    first_test_year=args.first_test_year,
+                    last_test_year=args.last_test_year,
+                )
+            else:
+                from .selection import run_export_dev_predictions
+
+                return run_export_dev_predictions(
+                    session=session,
+                    out_path=out_path,
+                    label_set=args.label_set,
+                    first_test_year=args.first_test_year,
+                    last_test_year=args.last_test_year,
+                )
+    except SystemExit:
+        raise
+    except Exception as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+
+
+def _cmd_hgb_experiments(args: argparse.Namespace) -> int:
+    from pathlib import Path
+
+    from sqlalchemy.orm import Session
+
+    from .db.engine import create_engine
+    from .hgb_experiments import N_BOOT, run_hgb_experiments
+
+    out_dir = Path(args.out_dir) if args.out_dir else _REPORTS_DIR
+    n_boot = 0 if args.no_boot else (args.n_boot or N_BOOT)
+
+    try:
+        engine = create_engine(url=args.database_url)
+        with Session(engine) as session:
+            _require_db_ready(engine)
+            return run_hgb_experiments(
                 session=session,
-                out_path=out_path,
+                out_dir=out_dir,
                 label_set=args.label_set,
                 first_test_year=args.first_test_year,
                 last_test_year=args.last_test_year,
+                n_boot=n_boot,
+                skip_bootstrap=args.no_boot,
             )
     except SystemExit:
         raise
@@ -877,6 +922,56 @@ def main() -> None:
         default=2017,
         metavar="YEAR",
     )
+    pexp.add_argument(
+        "--variant",
+        default=None,
+        metavar="NAME",
+        help=(
+            "HGB variant to export instead of the default hgb+vix_level pair. "
+            "One of: hgb_base, hgb_vixlvl, hgb_oof, hgb_hyst, hgb_epw, hgb_all."
+        ),
+    )
+
+    # ── hgb-experiments ──────────────────────────────────────────────────────
+    phgb = subparsers.add_parser(
+        "hgb-experiments",
+        help=(
+            "Run the pre-registered HGB experiment batch (six variants) on dev folds "
+            "and write docs/reports/<date>-hgb-experiments.md."
+        ),
+    )
+    phgb.add_argument("--label-set", default="ews_v1", metavar="NAME")
+    phgb.add_argument("--database-url", default=None, metavar="URL")
+    phgb.add_argument(
+        "--out-dir",
+        default=None,
+        metavar="DIR",
+        help="Directory to write the report (default: docs/reports/).",
+    )
+    phgb.add_argument(
+        "--no-boot",
+        action="store_true",
+        help="Skip year-block bootstrap (faster, no confidence intervals).",
+    )
+    phgb.add_argument(
+        "--n-boot",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Bootstrap resamples (default: 2000).",
+    )
+    phgb.add_argument(
+        "--first-test-year",
+        type=int,
+        default=2008,
+        metavar="YEAR",
+    )
+    phgb.add_argument(
+        "--last-test-year",
+        type=int,
+        default=2017,
+        metavar="YEAR",
+    )
 
     # ── select ────────────────────────────────────────────────────────────────
     ps = subparsers.add_parser(
@@ -934,6 +1029,8 @@ def main() -> None:
         sys.exit(_cmd_calibration_diag(args))
     elif args.command == "export-dev-predictions":
         sys.exit(_cmd_export_dev_predictions(args))
+    elif args.command == "hgb-experiments":
+        sys.exit(_cmd_hgb_experiments(args))
     elif args.command == "select":
         sys.exit(_cmd_select(args))
     else:
