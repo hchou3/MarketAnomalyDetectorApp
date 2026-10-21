@@ -1218,14 +1218,17 @@ def _evaluate_vix_baselines(
         test_level = vix_close[fold.test_lo : fold.test_hi]
         thr_level = choose_threshold(val_detect, val_level, FAR_BUDGET, excluded_mask=val_ku)
         test_alerts_level = vix_rule(test_level, thr_level)
-        # Platt on raw scores = identity (a=1, b=0); use raw level as "proba" proxy
+        # Soft probability: sigmoid centered at threshold → values in (0,1)
+        # so brier_score_loss and log_loss accept them.  The scale factor of 1
+        # means the sigmoid transition spans roughly ±5 VIX points.
+        test_proba_level = 1.0 / (1.0 + np.exp(-(test_level - thr_level)))
         level_folds.append(
             FoldResult(
                 fold_year=fold.test_year,
                 head="detect",
                 weeks=test_weeks,
                 true_labels=test_detect,
-                proba=test_level.astype(float),
+                proba=test_proba_level,
                 alerts=test_alerts_level,
                 threshold=thr_level,
                 platt_a=1.0,
@@ -1242,13 +1245,15 @@ def _evaluate_vix_baselines(
 
         thr_z52 = choose_threshold(val_detect, val_z52, FAR_BUDGET, excluded_mask=val_ku)
         test_alerts_z52 = vix_rule(test_z52, thr_z52)
+        # Same sigmoid soft probability centered at threshold
+        test_proba_z52 = 1.0 / (1.0 + np.exp(-(test_z52 - thr_z52)))
         z52_folds.append(
             FoldResult(
                 fold_year=fold.test_year,
                 head="detect",
                 weeks=test_weeks,
                 true_labels=test_detect,
-                proba=test_z52.astype(float),
+                proba=test_proba_z52,
                 alerts=test_alerts_z52,
                 threshold=thr_z52,
                 platt_a=1.0,

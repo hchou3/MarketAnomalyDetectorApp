@@ -519,16 +519,26 @@ def test_run_selection_smoke(db_session, tmp_path):
     db_session.bulk_save_objects(price_rows)
     db_session.flush()
 
-    # Generate weekly label rows (Tuesdays 2004-2017)
-    # Mark ~20% of weeks in 2008-2009 and 2011-2012 as anomalies
+    # Generate weekly label rows (Tuesdays 2004-2017).
+    # The 2008 fold's train is 2004-2005 and its val is 2006-2007;
+    # make_folds_v2 requires min_val_positives=8 and classifiers need both
+    # classes in train, so anomalies must appear in all these windows.
+    # 2004-2005: ~15% (train coverage).
+    # 2006-2007: ~25% (val window for the 2008 fold).
+    # 2008-2009, 2011-2012: ~50% (high-stress periods).
     label_set = "test_ews"
     tues = date(2004, 1, 6)
     label_rows = []
     while tues <= date(2017, 12, 26):
         yr = tues.year
-        val = 0
-        if (2008 <= yr <= 2009) or (2011 <= yr <= 2012):
+        if 2004 <= yr <= 2005:
+            val = 1 if rng.random() < 0.15 else 0
+        elif 2006 <= yr <= 2007:
+            val = 1 if rng.random() < 0.25 else 0
+        elif (2008 <= yr <= 2009) or (2011 <= yr <= 2012):
             val = 1 if rng.random() < 0.5 else 0
+        else:
+            val = 0
         label_rows.append(LabelRow(label_set=label_set, week=tues, value=val, source="test"))
         tues += timedelta(weeks=1)
     db_session.bulk_save_objects(label_rows)
