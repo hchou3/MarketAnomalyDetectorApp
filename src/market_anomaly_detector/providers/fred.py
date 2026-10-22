@@ -10,7 +10,7 @@ can additionally query ALFRED for vintage history to measure publication lags.
 
 from __future__ import annotations
 
-import io
+import re
 from datetime import date
 from typing import Callable, Optional
 from urllib.parse import urlencode
@@ -20,6 +20,7 @@ import pandas as pd
 from ._http import http_get
 
 _FREDGRAPH_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv"
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
 def _strip_preamble(text: str) -> str:
@@ -36,6 +37,41 @@ def _strip_preamble(text: str) -> str:
         if token == "DATE":
             return "".join(lines[i:])
     return text
+
+
+def _parse_fred_response(text: str, symbol: str) -> pd.DataFrame:
+    """Parse a FRED fredgraph.csv response into a two-column DataFrame.
+
+    Works with both the legacy (no preamble) and new (metadata preamble) FRED
+    formats by collecting only lines whose first comma-field is a YYYY-MM-DD
+    date string, ignoring all header and metadata rows entirely.
+    Falls back to the preamble-strip + read_csv path for backward compatibility.
+    """
+    rows: list[tuple[str, str]] = []
+    for line in text.splitlines():
+        parts = line.strip().split(",")
+        if len(parts) < 2:
+            continue
+        date_str = parts[0].strip().strip('"')
+        if _DATE_RE.match(date_str):
+            rows.append((date_str, parts[1].strip().strip('"')))
+
+    if not rows:
+        # If the text has a DATE header at all, it's a valid-but-empty series.
+        # Otherwise it looks like a completely malformed response.
+        if any(line.strip().upper().startswith("DATE") for line in text.splitlines()):
+            raise ValueError(f"FRED series {symbol!r} returned no usable data rows")
+        raise ValueError(f"Unexpected FRED response for {symbol!r}: {text[:200]!r}")
+
+    df = pd.DataFrame(rows, columns=["obs_date", "value"])
+    df["obs_date"] = pd.to_datetime(df["obs_date"]).dt.date
+    df["value"] = pd.to_numeric(df["value"], errors="coerce")
+    df = df.dropna(subset=["value"]).copy()
+
+    if df.empty:
+        raise ValueError(f"FRED series {symbol!r} returned no usable data rows")
+
+    return df.sort_values("obs_date").reset_index(drop=True)
 
 
 class FredProvider:
@@ -69,16 +105,4 @@ class FredProvider:
         url = f"{_FREDGRAPH_URL}?{urlencode(params)}"
 
         text = self._fetch(url)
-        df = pd.read_csv(io.StringIO(_strip_preamble(text)))
-        if df.shape[1] < 2:
-            raise ValueError(f"Unexpected FRED response for {symbol!r}: {text[:200]!r}")
-
-        df.columns = ["obs_date", "value"]
-        df["obs_date"] = pd.to_datetime(df["obs_date"]).dt.date
-        df["value"] = pd.to_numeric(df["value"], errors="coerce")
-        df = df.dropna(subset=["value"]).copy()
-
-        if df.empty:
-            raise ValueError(f"FRED series {symbol!r} returned no usable data rows")
-
-        return df.sort_values("obs_date").reset_index(drop=True)
+        return _parse_fred_response(text, symbol)
