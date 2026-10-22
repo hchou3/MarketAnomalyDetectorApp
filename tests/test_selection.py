@@ -906,3 +906,46 @@ def test_export_alerts_match_select():
     assert hgb_rows["hgb_prob"].notna().all(), "Some HGB rows have NaN prob but non-null alert"
     assert hgb_rows["hgb_threshold"].notna().all(), "Some HGB rows have NaN threshold"
     assert (hgb_rows["hgb_prob"].between(0.0, 1.0)).all(), "HGB probs outside [0, 1]"
+
+
+# ── predict-head boundary purge ───────────────────────────────────────────────
+
+
+def test_predict_head_no_boundary_leakage():
+    """After purging, no predict-head training row's target window overlaps val,
+    and no val row's target window overlaps test.
+
+    predict[t] = any(labels[t+1..t+h]); a row at t is leaky when t+h >= boundary.
+    """
+    from market_anomaly_detector.eval_harness import make_folds_v2
+    from market_anomaly_detector.labels import build_targets
+    from market_anomaly_detector.selection import HORIZON
+
+    rng = np.random.default_rng(42)
+    start = date(2000, 1, 4)
+    weeks = [start + timedelta(weeks=i) for i in range(1000)]
+    detect = (rng.uniform(size=1000) > 0.78).astype(int)
+    labels_df = pd.DataFrame({"week": weeks, "value": detect})
+
+    folds = make_folds_v2(weeks, detect, first_test_year=2008, last_test_year=2017)
+    predict_arr = build_targets(labels_df, horizon=HORIZON)["predict"].values
+
+    for fold in folds:
+        # Mirror the purge logic from evaluate_candidate.
+        train_pred_mask = ~np.isnan(predict_arr[: fold.val_lo])
+        train_purge_from = max(0, fold.val_lo - HORIZON)
+        train_pred_mask[train_purge_from:] = False
+
+        retained = np.flatnonzero(train_pred_mask)
+        assert (retained + HORIZON < fold.val_lo).all(), (
+            f"Fold {fold.test_year}: leaky training predict index detected"
+        )
+
+        val_pred_mask = ~np.isnan(predict_arr[fold.val_lo : fold.test_lo])
+        val_purge_from = max(0, fold.test_lo - HORIZON - fold.val_lo)
+        val_pred_mask[val_purge_from:] = False
+
+        retained_val = fold.val_lo + np.flatnonzero(val_pred_mask)
+        assert (retained_val + HORIZON < fold.test_lo).all(), (
+            f"Fold {fold.test_year}: leaky validation predict index detected"
+        )

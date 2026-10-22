@@ -67,6 +67,7 @@ class FoldResult:
     platt_b: float
     score_status: str = "ok"  # "ok" | "insufficient_data" | "single_class_val"
     rows_dropped: int = 0
+    predict_purged: int = 0  # rows dropped from predict head to prevent boundary leakage
 
 
 @dataclass
@@ -642,9 +643,24 @@ def evaluate_candidate(
         last_pipe_d = pipe_d
         last_platt_d = platt_d
 
-        # predict head
+        # predict head — purge the last h rows before each fold boundary.
+        # predict[t] = any(label[t+1..t+h]), so t in [boundary-h, boundary-1]
+        # reads labels from the next window and must not be used for fitting.
         train_pred_mask = ~np.isnan(predict_arr[: fold.val_lo])
+        train_purge_from = max(0, fold.val_lo - HORIZON)
+        n_train_purged = int(train_pred_mask[train_purge_from:].sum())
+        train_pred_mask[train_purge_from:] = False
+
         val_pred_mask = ~np.isnan(predict_arr[fold.val_lo : fold.test_lo])
+        val_purge_from = max(0, fold.test_lo - HORIZON - fold.val_lo)
+        n_val_purged = int(val_pred_mask[val_purge_from:].sum())
+        val_pred_mask[val_purge_from:] = False
+
+        n_predict_purged = n_train_purged + n_val_purged
+        print(
+            f"  [{name}] predict-head purge fold {fold.test_year}: "
+            f"{n_train_purged} train + {n_val_purged} val = {n_predict_purged} rows"
+        )
 
         y_train_pred = predict_arr[: fold.val_lo][core_train & train_pred_mask].astype(int)
         X_train_pred = X_train_raw[core_train & train_pred_mask]
@@ -681,6 +697,7 @@ def evaluate_candidate(
                     platt_a=1.0,
                     platt_b=0.0,
                     score_status="single_class_val",
+                    predict_purged=n_predict_purged,
                 )
             )
             continue
@@ -711,6 +728,7 @@ def evaluate_candidate(
                 threshold=thr_p,
                 platt_a=platt_p.a,  # type: ignore[arg-type]
                 platt_b=platt_p.b,  # type: ignore[arg-type]
+                predict_purged=n_predict_purged,
             )
         )
 
@@ -1091,6 +1109,21 @@ def write_selection_report(
     for nm, cr in candidates.items():
         for fr in cr.detect_folds:
             lines.append(f"| {nm} | {fr.fold_year} | {fr.rows_dropped} |")
+
+    # Predict-head purge table
+    # Predict-head purge table
+    lines += [
+        "",
+        "## Predict-head boundary purge",
+        "",
+        f"Rows dropped (train + val) per fold to prevent label leakage (h = {HORIZON} weeks).",
+        "",
+        "| Model | Fold year | Rows purged |",
+        "|-------|-----------|------------|",
+    ]
+    for nm, cr in candidates.items():
+        for fr in cr.predict_folds:
+            lines.append(f"| {nm} | {fr.fold_year} | {fr.predict_purged} |")
 
     # Fix 8: predict-head fallback footnote
     fallback_folds: dict[str, list[int]] = {}
@@ -1573,6 +1606,10 @@ def _evaluate_vix_baselines(
         val_pred_raw = predict_arr_vix[fold.val_lo : fold.test_lo]
         test_pred_raw = predict_arr_vix[fold.test_lo : fold.test_hi]
         val_pred_mask = ~np.isnan(val_pred_raw)
+        # Purge val rows where predict target leaks into the test window.
+        vix_val_purge_from = max(0, fold.test_lo - HORIZON - fold.val_lo)
+        n_vix_val_purged = int(val_pred_mask[vix_val_purge_from:].sum())
+        val_pred_mask[vix_val_purge_from:] = False
         test_pred_mask = ~np.isnan(test_pred_raw)
 
         y_val_pred = val_pred_raw[val_pred_mask].astype(int)
@@ -1602,6 +1639,7 @@ def _evaluate_vix_baselines(
                 threshold=thr_pred,
                 platt_a=1.0,
                 platt_b=0.0,
+                predict_purged=n_vix_val_purged,
             )
         )
 
