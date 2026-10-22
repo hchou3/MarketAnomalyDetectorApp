@@ -582,11 +582,11 @@ def _cmd_revalidate(args: argparse.Namespace) -> int:
         get_price_rows_as_df,
         write_quality_flags,
     )
-    from .registry import load_instruments
+    from .registry import load_registry
     from .validation import validate_provider_output
 
     try:
-        instruments = load_instruments()
+        instruments = load_registry()
     except Exception as exc:
         print(f"ERROR: loading registry: {exc}", file=sys.stderr)
         return 1
