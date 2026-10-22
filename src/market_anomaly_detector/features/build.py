@@ -209,26 +209,37 @@ def load_prices(
     ``bloomberg_ews`` is never selected.  If *as_of* is given, rows with
     ``known_at > as_of`` are excluded.
 
+    When a :class:`~.spec.FeatureSpec` entry has ``fallback_instrument_ids``, the
+    corresponding proxy instruments' data are spliced in before the primary's first
+    row, using only fallbacks rated ``"proxy"`` or ``"exact"``.
+
     Returns
     -------
     dict[str, pd.DataFrame]
         Keys are instrument IDs.  Each DataFrame has float ``value``,
-        date ``obs_date``, date ``known_at``, and str ``source_provider``
-        recording which provider supplied each row.
+        date ``obs_date``, date ``known_at``, str ``source_provider`` (provider
+        that fetched each row), and str ``source_instrument_id`` (which registry
+        instrument the row originated from).
     """
     from sqlalchemy import select
 
     from ..db.models import PriceRow, SymbolMapRow
 
     instrument_ids: set[str] = set()
+    # fallback_map: primary_id -> ordered list of fallback instrument IDs
+    fallback_map: dict[str, list[str]] = {}
+
     for feat in spec:
         instrument_ids.add(feat.instrument_id)
         if feat.instrument_id_2:
             instrument_ids.add(feat.instrument_id_2)
+        for fb_id in feat.fallback_instrument_ids:
+            existing = fallback_map.setdefault(feat.instrument_id, [])
+            if fb_id not in existing:
+                existing.append(fb_id)
 
-    result: dict[str, pd.DataFrame] = {}
-    for inst_id in sorted(instrument_ids):
-        providers = session.execute(
+    def _fetch_providers(inst_id: str) -> list[tuple[str, str, pd.DataFrame]]:
+        prows = session.execute(
             select(SymbolMapRow.provider, SymbolMapRow.priority, SymbolMapRow.fidelity)
             .where(
                 SymbolMapRow.instrument_id == inst_id,
@@ -237,8 +248,8 @@ def load_prices(
             .order_by(SymbolMapRow.priority)
         ).fetchall()
 
-        provider_dfs: list[tuple[str, str, pd.DataFrame]] = []
-        for prow in providers:
+        dfs: list[tuple[str, str, pd.DataFrame]] = []
+        for prow in prows:
             q = select(PriceRow.obs_date, PriceRow.value, PriceRow.known_at).where(
                 PriceRow.instrument_id == inst_id,
                 PriceRow.provider == prow.provider,
@@ -249,11 +260,44 @@ def load_prices(
             if rows:
                 df = pd.DataFrame(rows, columns=["obs_date", "value", "known_at"])
                 df["value"] = df["value"].astype(float)
-                provider_dfs.append((prow.provider, prow.fidelity, df))
+                dfs.append((prow.provider, prow.fidelity, df))
+        return dfs
 
-        spliced = _splice_providers(provider_dfs)
-        if spliced is not None:
-            result[inst_id] = spliced
+    result: dict[str, pd.DataFrame] = {}
+
+    for inst_id in sorted(instrument_ids):
+        # Within-instrument provider splice
+        combined = _splice_providers(_fetch_providers(inst_id))
+        if combined is not None:
+            combined["source_instrument_id"] = inst_id
+
+        # Cross-instrument fallback splice: earlier-dated proxy instruments
+        for fb_id in fallback_map.get(inst_id, []):
+            fb_dfs = _fetch_providers(fb_id)
+            if not fb_dfs:
+                continue
+            fb_fidelity = fb_dfs[0][1]  # fidelity of the highest-priority source
+            if fb_fidelity not in _SPLICE_FIDELITIES:
+                continue
+            fb_combined = _splice_providers(fb_dfs)
+            if fb_combined is None:
+                continue
+            fb_combined["source_instrument_id"] = fb_id
+
+            if combined is None:
+                combined = fb_combined
+            else:
+                earliest = combined["obs_date"].min()
+                earlier = fb_combined[fb_combined["obs_date"] < earliest].copy()
+                if not earlier.empty:
+                    combined = (
+                        pd.concat([earlier, combined], ignore_index=True)
+                        .sort_values("obs_date")
+                        .reset_index(drop=True)
+                    )
+
+        if combined is not None:
+            result[inst_id] = combined
 
     return result
 

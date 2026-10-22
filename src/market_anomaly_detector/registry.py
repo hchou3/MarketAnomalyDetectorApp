@@ -124,6 +124,9 @@ class Instrument(BaseModel):
     valid_from: Optional[str] = None
     valid_to: Optional[str] = None
     notes: str = ""
+    # For proxy instruments: the canonical instrument whose EWS column this
+    # proxies.  None for all primary instruments.
+    reference_instrument: Optional[str] = None
 
     @field_validator("id")
     @classmethod
@@ -142,6 +145,20 @@ class Instrument(BaseModel):
             raise ValueError(
                 f"Source priorities must be unique within instrument {self.id!r}; "
                 f"duplicate priority values: {sorted(set(dupes))}"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def providers_unique(self) -> Instrument:
+        providers = [s.provider for s in self.sources]
+        if len(providers) != len(set(providers)):
+            from collections import Counter
+
+            dupes = sorted({p for p, n in Counter(providers).items() if n > 1})
+            raise ValueError(
+                f"Instrument {self.id!r} has multiple sources with the same provider: "
+                f"{dupes}. Each provider must appear at most once per instrument; "
+                "use a separate proxy instrument for an alternative symbol."
             )
         return self
 
@@ -180,6 +197,15 @@ def load_registry(path: Path = _CONFIG_PATH) -> list[Instrument]:
 
         dupes = [sym for sym, n in Counter(ews_symbols).items() if n > 1]
         raise ValueError(f"bloomberg_ews symbol appears in multiple instruments: {dupes}")
+
+    # Cross-instrument: reference_instrument must name an existing instrument ID
+    all_ids = {inst.id for inst in instruments}
+    for inst in instruments:
+        if inst.reference_instrument and inst.reference_instrument not in all_ids:
+            raise ValueError(
+                f"Instrument {inst.id!r} has reference_instrument "
+                f"{inst.reference_instrument!r} which does not exist in the registry"
+            )
 
     return instruments
 

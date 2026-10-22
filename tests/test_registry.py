@@ -387,3 +387,85 @@ def test_yahoo_etf_sources_have_auto_adjust(registry):
                     f"Instrument {inst.id!r}: Yahoo ETF source {src.symbol!r} "
                     "must have auto_adjust=True for total-return prices"
                 )
+
+
+# ── Step 5: proxy instrument validation ──────────────────────────────────────
+
+
+def test_providers_unique_per_instrument(registry):
+    """Each instrument may have at most one source per provider."""
+    for inst in registry:
+        providers = [s.provider for s in inst.sources]
+        assert len(providers) == len(set(providers)), (
+            f"Instrument {inst.id!r} has duplicate providers: {providers}"
+        )
+
+
+def test_reference_instrument_exists_in_registry(registry):
+    """All reference_instrument values point to existing instrument IDs."""
+    inst_ids = {inst.id for inst in registry}
+    for inst in registry:
+        if inst.reference_instrument:
+            assert inst.reference_instrument in inst_ids, (
+                f"Instrument {inst.id!r} has reference_instrument "
+                f"{inst.reference_instrument!r} which is not in the registry"
+            )
+
+
+def test_proxy_instruments_have_no_bloomberg_ews_source(registry):
+    """Proxy instruments (with reference_instrument set) must not carry a bloomberg_ews source.
+
+    The EWS comparison is performed via the reference instrument's series; a
+    duplicate EWS entry would collide in the symbol map.
+    """
+    for inst in registry:
+        if inst.reference_instrument:
+            ews_srcs = [s for s in inst.sources if s.provider == "bloomberg_ews"]
+            assert not ews_srcs, (
+                f"Proxy instrument {inst.id!r} has bloomberg_ews source(s) "
+                f"{[s.symbol for s in ews_srcs]}; proxy instruments must use "
+                "reference_instrument for EWS comparison instead."
+            )
+
+
+def test_schema_rejects_duplicate_provider():
+    """Two sources with the same provider in one instrument are rejected."""
+    with pytest.raises(Exception, match="[Pp]rovider"):
+        Instrument.model_validate(
+            _minimal_instrument(
+                sources=[
+                    {"provider": "yahoo", "symbol": "A", "priority": 1, "fidelity": "exact"},
+                    {"provider": "yahoo", "symbol": "B", "priority": 2, "fidelity": "exact"},
+                ]
+            )
+        )
+
+
+def test_load_registry_rejects_unknown_reference_instrument(tmp_path):
+    """reference_instrument pointing to a non-existent ID raises ValueError."""
+    bad_yaml = tmp_path / "instruments.yaml"
+    bad_yaml.write_text(
+        "- id: proxy_inst\n"
+        "  name: Proxy\n"
+        "  reference_instrument: nonexistent_inst\n"
+        "  asset_class: equity_index\n"
+        "  groups: [equity_index]\n"
+        "  units: index_points\n"
+        "  quote: Index level\n"
+        "  native_frequency: daily\n"
+        "  sources:\n"
+        "    - provider: yahoo\n"
+        "      symbol: TEST\n"
+        "      priority: 1\n"
+        "      fidelity: proxy\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="nonexistent_inst"):
+        load_registry(bad_yaml)
+
+
+def test_registry_and_spec_pass_full_validation(registry):
+    """Loading instruments.yaml and SPEC_V1 through full validation raises no errors."""
+    from market_anomaly_detector.features.spec import SPEC_V1, validate_spec_fallbacks
+
+    validate_spec_fallbacks(SPEC_V1, registry)

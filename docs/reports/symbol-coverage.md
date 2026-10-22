@@ -6,91 +6,125 @@ against the live database.*
 
 ---
 
-## What changed
+## Architecture
 
-Longer-history Yahoo proxies added for five instruments. Each new source is
-declared `fidelity: proxy`; the coverage report will confirm or flag that
-declaration when live data is available. The existing primary sources (lowest
-priority number) are unchanged.
+Each longer-history Yahoo source is now its own top-level instrument in
+`config/instruments.yaml` rather than a second source on the canonical instrument.
+This avoids `(instrument_id, provider)` primary-key collisions in `symbol_map` and
+`prices` (each allows at most one source per provider per instrument).
+
+### Proxy instrument pattern
+
+```yaml
+- id: crb_commodity_bcom          # new proxy instrument
+  reference_instrument: crb_commodity   # EWS column for fidelity comparison
+  sources:
+    - provider: yahoo
+      symbol: "^BCOM"
+      fidelity: proxy
+```
+
+`reference_instrument` tells the coverage report which EWS column to compare against
+(e.g., `crb_commodity_bcom` is compared against CRY via `crb_commodity`).
 
 ### Splicing behaviour
 
-`load_prices` now splices earlier-starting secondaries onto the primary when
-the secondary's declared fidelity is `proxy` or `exact`. The splice is
-backward-only: secondary rows are used only for dates **before** the primary's
-first observation. A `source_provider` column on the returned DataFrame records
-which provider contributed each row.
+To use a proxy instrument as a history extension, add its ID to
+`FeatureSpec.fallback_instrument_ids`:
+
+```python
+FeatureSpec(
+    col="crb_commodity_lr_1w",
+    instrument_id="crb_commodity",
+    fallback_instrument_ids=["crb_commodity_bcom"],
+    ...
+)
+```
+
+`load_prices` splices the fallback's rows into the primary's DataFrame, but only
+for dates **before** the primary's first observation, and only when the fallback's
+declared fidelity is `proxy` or `exact`. A `source_instrument_id` column records
+which registry instrument contributed each row.
 
 ---
 
-## New sources
+## New proxy instruments
 
-### `us_hy_corp_tr` — Bloomberg US HY Corporate Bond TR
-
-| Priority | Symbol | Provider | From | Auto-adjust |
-|----------|--------|----------|------|-------------|
-| 1 | HYG | yahoo | 2007-04-11 | yes |
-| **2** | **VWEHX** | **yahoo** | **~1978** | **yes** |
-| 99 | LF98TRUU | bloomberg_ews | — | — |
-
-VWEHX (Vanguard High-Yield Corporate Bond mutual fund) is a mutual-fund NAV
-series going back to 1978. It fills the pre-2007 window where HYG has no data.
-Both track the broad US HY market; NAV and ETF pricing should correlate strongly
-during overlap.
-
-### `msci_europe` — MSCI Europe Index
+### `us_hy_corp_tr_vwehx` — proxy for `us_hy_corp_tr`
 
 | Priority | Symbol | Provider | From | Auto-adjust |
 |----------|--------|----------|------|-------------|
-| 1 | VGK | yahoo | 2005-03-04 | yes |
-| **2** | **IEV** | **yahoo** | **~2000-07-25** | **yes** |
-| **3** | **^STOXX50E** | **yahoo** | **~1986** | **no** |
-| 99 | MXEU | bloomberg_ews | — | — |
+| 1 | VWEHX | yahoo | ~1978 | yes |
 
-IEV (iShares Europe ETF) extends coverage to 2000. ^STOXX50E (Euro Stoxx 50) is
-EUR-denominated and covers only large-cap eurozone names — expect lower
-correlation with MSCI Europe (USD, broad) but usable as a proxy pre-2000.
+VWEHX (Vanguard High-Yield Corporate Bond mutual fund) is a NAV series going back
+to 1978. Compared against LF98TRUU (via `reference_instrument: us_hy_corp_tr`).
 
-### `msci_india` — MSCI India Index
+### `msci_europe_iev` — proxy for `msci_europe`
 
 | Priority | Symbol | Provider | From | Auto-adjust |
 |----------|--------|----------|------|-------------|
-| 1 | INDA | yahoo | 2012-02-09 | yes |
-| **2** | **EPI** | **yahoo** | **2008-02-22** | **yes** |
-| **3** | **^BSESN** | **yahoo** | **~1979** | **no** |
-| 99 | MXIN | bloomberg_ews | — | — |
+| 1 | IEV | yahoo | ~2000-07-25 | yes |
 
-EPI (WisdomTree India Earnings ETF, USD) bridges 2008–2012. ^BSESN (BSE
-Sensex, INR) provides deep history but carries a currency mismatch; fidelity
-vs the USD-denominated MSCI India may be "review_required" — let the coverage
-report decide.
+iShares Europe ETF; extends coverage from 2000 before VGK's 2005 start.
+Compared against MXEU (via `reference_instrument: msci_europe`).
 
-### `msci_china` — MSCI China Index
+### `msci_europe_stoxx50` — proxy for `msci_europe`
 
 | Priority | Symbol | Provider | From | Auto-adjust |
 |----------|--------|----------|------|-------------|
-| 1 | MCHI | yahoo | 2011-03-29 | yes |
-| **2** | **FXI** | **yahoo** | **2004-10-05** | **yes** |
-| **3** | **000001.SS** | **yahoo** | **~1990** | **no** |
-| 99 | MXCN | bloomberg_ews | — | — |
+| 1 | ^STOXX50E | yahoo | ~1986 | no |
 
-FXI (iShares China Large-Cap ETF, USD) bridges 2004–2011. 000001.SS (Shanghai
-Composite, CNY, A-shares) provides deep history; currency mismatch and different
-universe — coverage report will measure actual correlation.
+Euro Stoxx 50 (EUR-denominated, large-cap eurozone only); provides deep history
+pre-2000 at the cost of currency mismatch and narrower universe.
+Compared against MXEU (via `reference_instrument: msci_europe`).
 
-### `crb_commodity` — Thomson Reuters/CoreCommodity CRB Index
+### `msci_india_epi` — proxy for `msci_india`
 
 | Priority | Symbol | Provider | From | Auto-adjust |
 |----------|--------|----------|------|-------------|
-| 1 | DBC | yahoo | 2006-02-03 | yes |
-| **2** | **^BCOM** | **yahoo** | **~1991** | **no** |
-| 99 | CRY | bloomberg_ews | — | — |
+| 1 | EPI | yahoo | 2008-02-22 | yes |
 
-^BCOM (Bloomberg Commodity Index, launched as DJ-AIG Commodity Index in 1998,
-back-calculated to ~1991 on Yahoo) is the longest public commodity index
-available on Yahoo with pre-2006 coverage. It tracks a different basket from CRY
-(Reuters/Jefferies CRB); expect `proxy` fidelity at best. Verify the actual
-Yahoo start date by running `mad-data backfill crb_commodity`.
+WisdomTree India Earnings ETF (USD); bridges 2008–2012.
+Compared against MXIN (via `reference_instrument: msci_india`).
+
+### `msci_india_bsesn` — proxy for `msci_india`
+
+| Priority | Symbol | Provider | From | Auto-adjust |
+|----------|--------|----------|------|-------------|
+| 1 | ^BSESN | yahoo | ~1979 | no |
+
+BSE Sensex (INR-denominated, 30 large-cap stocks); provides deep history
+pre-2008 at the cost of currency mismatch.
+Compared against MXIN (via `reference_instrument: msci_india`).
+
+### `msci_china_fxi` — proxy for `msci_china`
+
+| Priority | Symbol | Provider | From | Auto-adjust |
+|----------|--------|----------|------|-------------|
+| 1 | FXI | yahoo | 2004-10-05 | yes |
+
+iShares China Large-Cap ETF (USD); bridges 2004–2011.
+Compared against MXCN (via `reference_instrument: msci_china`).
+
+### `msci_china_sse` — proxy for `msci_china`
+
+| Priority | Symbol | Provider | From | Auto-adjust |
+|----------|--------|----------|------|-------------|
+| 1 | 000001.SS | yahoo | ~1990 | no |
+
+Shanghai Composite Index (CNY-denominated); provides deep history pre-2004
+at the cost of currency mismatch and different universe.
+Compared against MXCN (via `reference_instrument: msci_china`).
+
+### `crb_commodity_bcom` — proxy for `crb_commodity`
+
+| Priority | Symbol | Provider | From | Auto-adjust |
+|----------|--------|----------|------|-------------|
+| 1 | ^BCOM | yahoo | ~1991 | no |
+
+Bloomberg Commodity Index (launched as DJ-AIG Commodity Index in 1998,
+back-calculated to ~1991 on Yahoo). Extends coverage before DBC's 2006 start.
+Compared against CRY (via `reference_instrument: crb_commodity`).
 
 ---
 
@@ -99,22 +133,24 @@ Yahoo start date by running `mad-data backfill crb_commodity`.
 Run after fetching live data:
 
 ```
-mad-data backfill us_hy_corp_tr msci_europe msci_india msci_china crb_commodity
+mad-data backfill crb_commodity_bcom msci_europe_iev msci_europe_stoxx50
+mad-data backfill msci_india_epi msci_india_bsesn msci_china_fxi msci_china_sse
+mad-data backfill us_hy_corp_tr_vwehx
 mad-data coverage --check
 ```
 
 Expected outcomes (to confirm or override after measurement):
 
-| Instrument | New source | Expected suggested fidelity |
-|------------|------------|----------------------------|
-| us_hy_corp_tr | VWEHX | proxy |
-| msci_europe | IEV | proxy |
-| msci_europe | ^STOXX50E | proxy or review_required |
-| msci_india | EPI | proxy |
-| msci_india | ^BSESN | proxy or review_required |
-| msci_china | FXI | proxy |
-| msci_china | 000001.SS | proxy or review_required |
-| crb_commodity | ^BCOM | proxy or review_required |
+| Proxy instrument | Symbol | Expected suggested fidelity |
+|------------------|--------|-----------------------------|
+| us_hy_corp_tr_vwehx | VWEHX | proxy |
+| msci_europe_iev | IEV | proxy |
+| msci_europe_stoxx50 | ^STOXX50E | proxy or review_required |
+| msci_india_epi | EPI | proxy |
+| msci_india_bsesn | ^BSESN | proxy or review_required |
+| msci_china_fxi | FXI | proxy |
+| msci_china_sse | 000001.SS | proxy or review_required |
+| crb_commodity_bcom | ^BCOM | proxy or review_required |
 
 If the coverage report flags a mismatch, either add `fidelity-override:` to the
 instrument's `notes` field (with justification) or change the YAML fidelity to
