@@ -120,7 +120,7 @@ def is_stale(
     """Return True if the instrument is overdue for an update.
 
     Thresholds: daily → 5 business days; weekly → 10 calendar days;
-    monthly → 45 calendar days.  ``publication_lag_days`` shifts the
+    monthly → 75 calendar days.  ``publication_lag_days`` shifts the
     reference point backward so a series with a known release delay is
     not false-positively flagged.
     """
@@ -137,7 +137,7 @@ def is_stale(
     elif native_frequency == "weekly":
         return (effective_today - last_obs_date).days >= 10
     else:  # monthly
-        return (effective_today - last_obs_date).days >= 45
+        return (effective_today - last_obs_date).days >= 75
 
 
 # ── Internal helpers ──────────────────────────────────────────────────────────

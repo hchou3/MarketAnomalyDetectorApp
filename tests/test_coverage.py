@@ -159,6 +159,26 @@ def test_unit_error_level_ratio_skipped_for_proxy():
     assert result.median_level_ratio is None
 
 
+def test_compare_level_false_suppresses_level_ratio_for_exact_source():
+    """Level ratio must be None when compare_level=False even for an exact source."""
+    dates = _weekly_dates(_START_TUE, _N_SUFFICIENT)
+    vals = [100.0 + i * 0.5 for i in range(_N_SUFFICIENT)]
+
+    # Live series at 10x scale (like ^GSPC vs MXUS)
+    live = _df(dates, [v * 10 for v in vals])
+    ews = _df(dates, vals)
+
+    result = compare_fidelity(
+        live, ews, units="price", source_frequency="daily", is_exact=True, compute_level_ratio=False
+    )
+
+    assert result.sufficient
+    assert result.change_correlation is not None
+    assert result.change_correlation > 0.99
+    # Level ratio suppressed because the series are on different scales
+    assert result.median_level_ratio is None
+
+
 # ── compare_fidelity: yield near zero or negative ─────────────────────────────
 
 

@@ -70,6 +70,10 @@ class SourceEntry(BaseModel):
     # Yahoo-specific: True folds splits and dividends into Close (total-return).
     # Set True for ETF proxies; leave False for indices, futures, and FX pairs.
     auto_adjust: bool = False
+    # False when the live series and the EWS reference are on different index
+    # scales (e.g. ^GSPC level ~5500 vs Bloomberg MXUS ~600); suppresses the
+    # level-ratio check even for exact-fidelity sources.
+    compare_level: bool = True
     notes: str = ""
 
     @field_validator("provider")

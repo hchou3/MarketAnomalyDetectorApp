@@ -244,6 +244,31 @@
     Proxy for gbp_usd. Will fill pre-2003 history once FRED is backfilled.
     Use as fallback_instrument_id in FeatureSpec entries for gbp_usd features.
 
+- id: usd_jpy_fred
+  name: USD/JPY history proxy — FRED DEXJPUS
+  reference_instrument: usd_jpy
+  asset_class: fx
+  groups: [fx]
+  units: price
+  quote: Japanese yen per US dollar (spot rate)
+  native_frequency: daily
+  sources:
+    - provider: fred
+      symbol: DEXJPUS
+      priority: 1
+      fidelity: exact
+      publication_lag_days: 10
+      notes: >
+        H.10 release; same conservative 10-day floor as DEXUSUK. FRED DEXJPUS
+        carries USD/JPY data back to 1971-01-04, before Yahoo JPY=X reliable
+        start of ~1996-10-30. Also fills the Yahoo 2008-07-31..2008-08-26 gap.
+        Weekly-change corr vs EWS JPY = TBD (run mad-data backfill to populate).
+  valid_from: null
+  valid_to: null
+  notes: >
+    Proxy for usd_jpy. Fills pre-1996 history and the Yahoo 2008-07-31..2008-08-26
+    gap. Use as fallback_instrument_id in FeatureSpec entries for usd_jpy features.
+
 # ── Volatility ─────────────────────────────────────────────────────────────────
 
 - id: vix
@@ -847,9 +872,12 @@
       symbol: "^GSPC"
       priority: 1
       fidelity: exact
+      compare_level: false
       notes: >
         S&P 500; weekly-change corr vs EWS MXUS = 0.999 (1111 weeks),
-        above the 0.98 exact threshold.
+        above the 0.98 exact threshold. Level ratio suppressed: ^GSPC (~5500)
+        and Bloomberg MXUS (~600) are different index series with incomparable
+        absolute levels.
     - provider: bloomberg_ews
       symbol: MXUS
       priority: 99
@@ -943,15 +971,15 @@
   native_frequency: daily
   sources:
     - provider: yahoo
-      symbol: EWJ
+      symbol: "^N225"
       priority: 1
       fidelity: proxy
-      auto_adjust: true
+      auto_adjust: false
       notes: >
-        iShares MSCI Japan ETF. Weekly-change corr vs EWS MXJP = 0.787
-        (1111 weeks); below the 0.80 proxy threshold, likely a timing
-        misalignment between US-hours EWJ close and EWS MXJP snapshot.
-        Timing-diagnostic under investigation with msci_japan_n225.
+        Nikkei 225 (JPY-denominated, price-weighted); history from ~1965.
+        Weekly-change corr vs EWS MXJP = 0.971; preferred Japan proxy.
+        Replaces EWJ (corr 0.787, US-hours timing mismatch). Currency and
+        construction differ from MXJP but correlation is substantially higher.
     - provider: bloomberg_ews
       symbol: MXJP
       priority: 99
@@ -959,11 +987,12 @@
   valid_from: null
   valid_to: null
   notes: >
-    fidelity-override: EWJ US-hours vs EWS MXJP timing under investigation;
-    baseline corr 0.787 below proxy threshold. See timing-diagnostic report.
+    Preferred live source switched to ^N225 (corr 0.971 vs EWS MXJP).
+    EWJ (corr 0.787) removed; prior EWJ data remains in DB but new backfills
+    use ^N225. See msci_japan_n225 for standalone long-history splice instrument.
 
 - id: msci_japan_n225
-  name: MSCI Japan proxy — Nikkei 225 Index (^N225)
+  name: MSCI Japan proxy — Nikkei 225 Index (^N225, standalone)
   reference_instrument: msci_japan
   asset_class: equity_index
   groups: [equity_index]
@@ -980,16 +1009,15 @@
       publication_lag_days: 0
       notes: >
         Nikkei 225 (JPY-denominated, price-weighted); history from ~1965.
-        Currency mismatch vs MSCI Japan (USD) and different construction
-        (price-weighted vs float-adjusted market-cap). Included for
-        timing-diagnostic: N225 trades Tokyo hours (JST) vs EWJ (US close),
-        so obs_date shift pattern may differ. See timing-diagnostic report.
+        Weekly-change corr vs EWS MXJP = 0.971. ^N225 is now also priority-1
+        source on the msci_japan instrument. This standalone entry is kept for
+        timing-diagnostic reference and FeatureSpec long-history splice.
   valid_from: null
   valid_to: null
   notes: >
-    Proxy for msci_japan. Timing-diagnostic candidate: ^N225 local-currency
-    data may align more naturally with EWS MXJP Wednesday snapshot than
-    EWJ (US close). Evaluate before adding to FeatureSpec fallback_instrument_ids.
+    Standalone proxy for msci_japan. ^N225 (corr 0.971) is also the priority-1
+    source on msci_japan. Use as fallback_instrument_id in FeatureSpec for
+    pre-EWJ history extension.
 
 - id: msci_brazil
   name: MSCI Brazil Index

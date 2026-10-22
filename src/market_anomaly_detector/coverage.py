@@ -145,6 +145,7 @@ def compare_fidelity(
     units: str,
     source_frequency: str,
     is_exact: bool,
+    compute_level_ratio: bool = True,
 ) -> FidelityComparison:
     """Compare a live series against the bloomberg_ews reference.
 
@@ -198,7 +199,7 @@ def compare_fidelity(
     corr = _correlation(live_chg, ews_chg)
 
     sign_inverted = corr is not None and corr < _INVERSION_THRESHOLD
-    level_ratio = _level_ratio(live_vals, ews_vals) if is_exact else None
+    level_ratio = _level_ratio(live_vals, ews_vals) if (is_exact and compute_level_ratio) else None
 
     if corr is None:
         suggested = "review_required"
@@ -425,6 +426,7 @@ def _build_row(
             units=inst.units.value,
             source_frequency=src_freq,
             is_exact=is_exact,
+            compute_level_ratio=getattr(chosen_src, "compare_level", True),
         )
 
     # ── Fidelity mismatch ─────────────────────────────────────────────────────

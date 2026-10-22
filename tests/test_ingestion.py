@@ -455,16 +455,16 @@ def test_staleness_weekly_stale_at_boundary():
 
 
 def test_staleness_monthly_not_stale():
-    """Monthly: 44 calendar days = not stale."""
-    today = date(2024, 3, 15)
-    last = date(2024, 1, 31)  # Feb(29) + 15 Mar = 44 days
+    """Monthly: 74 calendar days = not stale."""
+    today = date(2024, 4, 14)
+    last = date(2024, 1, 31)  # Feb(29) + Mar(31) + 14 Apr = 74 days
     assert not is_stale(last, "monthly", today)
 
 
 def test_staleness_monthly_stale_at_boundary():
-    """Monthly: 45 calendar days = stale."""
-    today = date(2024, 3, 15)
-    last = date(2024, 1, 30)  # 1 Jan + 29 Feb + 15 Mar = 45 days
+    """Monthly: 75 calendar days = stale."""
+    today = date(2024, 4, 15)
+    last = date(2024, 1, 31)  # Feb(29) + Mar(31) + 15 Apr = 75 days
     assert is_stale(last, "monthly", today)
 
 
@@ -483,10 +483,11 @@ def test_staleness_publication_lag_shifts_threshold():
 
 
 def test_staleness_monthly_with_lag_not_stale():
-    """Monthly series with 45-day lag: 44 days ago is not stale despite threshold being 45."""
-    today = date(2024, 3, 15)
-    last = date(2024, 1, 31)  # 44 days before today → not stale at 0 lag
-    # With 10-day lag: effective_today = Mar 5; (Mar 5 - Jan 31) = 34 days < 45 → not stale
+    """Monthly: series 80 days ago is stale without lag, not stale with 10-day lag."""
+    today = date(2024, 4, 10)
+    last = date(2024, 1, 21)  # (Apr 10 - Jan 21) = 80 days > 75 → stale
+    assert is_stale(last, "monthly", today, publication_lag_days=0)
+    # With 10-day lag: effective_today = Mar 31; (Mar 31 - Jan 21) = 70 days < 75 → not stale
     assert not is_stale(last, "monthly", today, publication_lag_days=10)
 
 
