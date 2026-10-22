@@ -152,6 +152,85 @@ def test_validate_no_large_move_check_on_single_row():
     assert not [f for f in flags if f.rule == "large_move"]
 
 
+# ── Yield large_move threshold (50 bp) ───────────────────────────────────────
+
+
+def test_validate_yield_51bp_flagged():
+    """51bp daily change on a percent-unit instrument is flagged (threshold=50bp)."""
+    inst = _inst(asset_class=AssetClass.rate, units=Units.percent)
+    df = _df([("2024-01-02", 4.00), ("2024-01-03", 4.51)])  # +51bp
+    _, flags = validate_provider_output(df, inst)
+    move_flags = [f for f in flags if f.rule == "large_move"]
+    assert len(move_flags) == 1
+    assert move_flags[0].obs_date == date(2024, 1, 3)
+    assert "51bp" in move_flags[0].detail
+
+
+def test_validate_yield_49bp_not_flagged():
+    """49bp daily change on a percent-unit instrument is NOT flagged."""
+    inst = _inst(asset_class=AssetClass.rate, units=Units.percent)
+    df = _df([("2024-01-02", 4.00), ("2024-01-03", 4.49)])  # +49bp
+    _, flags = validate_provider_output(df, inst)
+    assert not [f for f in flags if f.rule == "large_move"]
+
+
+# ── Zero-centred index large_move (rolling 4-std-dev) ────────────────────────
+
+
+def _zero_centred_inst(id_: str = "nfci") -> "Instrument":
+    return _inst(
+        id_=id_, asset_class=AssetClass.macro_index, units=Units.index_points, allow_negative=True
+    )
+
+
+def test_validate_zero_centred_large_change_flagged():
+    """A change of 5 std devs on a zero-centred index is flagged."""
+    import numpy as np
+
+    rng = np.random.default_rng(42)
+    # Build 30-point series with std ~1.0 (mean=0); then add a 5-sigma spike
+    base = list(rng.normal(0.0, 1.0, 30))
+    obs_dates = [date(2024, 1, 1 + i) for i in range(31)]
+    values = base + [base[-1] + 6.0]  # +6.0 ≫ 4-sigma
+    df = pd.DataFrame({"obs_date": obs_dates, "value": values})
+    _, flags = validate_provider_output(df, _zero_centred_inst())
+    move_flags = [f for f in flags if f.rule == "large_move"]
+    assert len(move_flags) >= 1
+    assert move_flags[-1].obs_date == obs_dates[-1]
+
+
+def test_validate_zero_centred_small_change_not_flagged():
+    """A change of 1 std dev on a zero-centred index is NOT flagged."""
+    import numpy as np
+
+    rng = np.random.default_rng(7)
+    base = list(rng.normal(0.0, 1.0, 30))
+    obs_dates = [date(2024, 1, 1 + i) for i in range(31)]
+    values = base + [base[-1] + 1.0]  # ~1 sigma
+    df = pd.DataFrame({"obs_date": obs_dates, "value": values})
+    _, flags = validate_provider_output(df, _zero_centred_inst())
+    # Only the last row is in question; it should not be flagged
+    last_date = obs_dates[-1]
+    move_flags = [f for f in flags if f.rule == "large_move" and f.obs_date == last_date]
+    assert not move_flags
+
+
+def test_validate_zero_centred_not_flagged_when_insufficient_history():
+    """With fewer than 8 observations, the rolling std is NaN and no flag is emitted."""
+    obs_dates = [date(2024, 1, 1 + i) for i in range(7)]
+    values = [0.0, 1.0, -1.0, 0.5, -0.5, 0.0, 100.0]  # last is huge but history too short
+    df = pd.DataFrame({"obs_date": obs_dates, "value": values})
+    _, flags = validate_provider_output(df, _zero_centred_inst())
+    assert not [f for f in flags if f.rule == "large_move"]
+
+
+def test_validate_zero_centred_negative_not_flagged():
+    """Negative values on a zero-centred index do NOT raise negative_value flags."""
+    df = _df([("2024-01-02", 1.0), ("2024-01-03", -0.5)])
+    _, flags = validate_provider_output(df, _zero_centred_inst())
+    assert not [f for f in flags if f.rule == "negative_value"]
+
+
 # ── yfinance signature ────────────────────────────────────────────────────────
 
 

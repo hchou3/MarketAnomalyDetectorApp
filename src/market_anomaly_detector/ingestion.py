@@ -77,6 +77,7 @@ def run_backfill(
     run_id: Optional[int] = None,
     since: Optional[date] = None,
     get_start: Optional[Callable[[str, str], Optional[date]]] = None,
+    cutoff_date: Optional[date] = None,
 ) -> list[InstrumentResult]:
     """Fetch and store prices for *instruments* using *providers* and *sink*.
 
@@ -103,10 +104,17 @@ def run_backfill(
         returns the fetch start date for each (instrument, provider) pair.
         When it returns ``None``, the full history is fetched.
         Takes precedence over *since*.
+    cutoff_date:
+        Exclude daily bars with obs_date >= this date (default: today).
+        Prevents incomplete intraday bars from being stored before the session
+        closes.  Monthly/weekly bars are not filtered.
     """
+    today_cutoff = cutoff_date if cutoff_date is not None else date.today()
     results: list[InstrumentResult] = []
     for instrument in instruments:
-        result = _process_one(instrument, providers, sink, run_id, get_start, since, session)
+        result = _process_one(
+            instrument, providers, sink, run_id, get_start, since, session, today_cutoff
+        )
         results.append(result)
     return results
 
@@ -151,6 +159,7 @@ def _process_one(
     get_start: Optional[Callable[[str, str], Optional[date]]],
     since: Optional[date],
     session: Any,
+    cutoff_date: Optional[date] = None,
 ) -> InstrumentResult:
     from .validation import validate_provider_output
 
@@ -196,6 +205,8 @@ def _process_one(
             with ctx:
                 df = provider.get_history(source.symbol, start=effective_start)
                 clean_df, flags = validate_provider_output(df, instrument)
+                if cutoff_date is not None and freq == "daily":
+                    clean_df = clean_df[clean_df["obs_date"] < cutoff_date].reset_index(drop=True)
                 rows = _to_price_rows(
                     clean_df,
                     instrument_id=instrument.id,

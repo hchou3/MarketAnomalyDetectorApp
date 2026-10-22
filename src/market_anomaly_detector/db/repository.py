@@ -9,7 +9,7 @@ from __future__ import annotations
 from datetime import date, datetime, timezone
 from typing import NamedTuple, Optional
 
-from sqlalchemy import delete, func, literal_column, or_, select
+from sqlalchemy import delete, func, literal, literal_column, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -286,7 +286,10 @@ def upsert_prices(
                 "run_id": ins.excluded.run_id,
             },
             where=or_(
-                PriceRow.__table__.c.value.is_distinct_from(ins.excluded.value),
+                func.abs(PriceRow.__table__.c.value - ins.excluded.value)
+                > func.greatest(
+                    literal(1e-6), literal(1e-7) * func.abs(PriceRow.__table__.c.value)
+                ),
                 PriceRow.__table__.c.known_at.is_distinct_from(ins.excluded.known_at),
             ),
         ).returning(
@@ -368,6 +371,33 @@ def write_quality_flags(
                 detail=flag.detail,
             )
         )
+
+
+def get_price_rows_as_df(session: Session, instrument_id: str, provider: str):
+    """Return all stored price rows for one (instrument, provider) as a DataFrame."""
+    import pandas as pd
+
+    rows = session.execute(
+        select(PriceRow.obs_date, PriceRow.value)
+        .where(PriceRow.instrument_id == instrument_id, PriceRow.provider == provider)
+        .order_by(PriceRow.obs_date)
+    ).fetchall()
+    if not rows:
+        return pd.DataFrame(columns=["obs_date", "value"])
+    return pd.DataFrame(
+        {"obs_date": [r.obs_date for r in rows], "value": [float(r.value) for r in rows]}
+    )
+
+
+def delete_quality_flags_for_source(session: Session, instrument_id: str, provider: str) -> int:
+    """Delete all data_quality_flags rows for (instrument_id, provider); return count deleted."""
+    result = session.execute(
+        delete(DataQualityFlagRow).where(
+            DataQualityFlagRow.instrument_id == instrument_id,
+            DataQualityFlagRow.provider == provider,
+        )
+    )
+    return result.rowcount
 
 
 def start_run(session: Session, mode: str) -> IngestionRunRow:
@@ -532,7 +562,7 @@ def get_instrument_last_dates(session: Session) -> list:
 def get_source_last_dates(session: Session) -> list:
     """Return max obs_date per active (instrument, provider), with source metadata.
 
-    Each row has: id, native_frequency, provider, source_frequency,
+    Each row has: id, native_frequency, provider, priority, source_frequency,
     publication_lag_days, last_obs_date.
     """
     return session.execute(
@@ -540,6 +570,7 @@ def get_source_last_dates(session: Session) -> list:
             InstrumentRow.id,
             InstrumentRow.native_frequency,
             SymbolMapRow.provider,
+            SymbolMapRow.priority,
             SymbolMapRow.source_frequency,
             SymbolMapRow.publication_lag_days,
             func.max(PriceRow.obs_date).label("last_obs_date"),
@@ -555,10 +586,11 @@ def get_source_last_dates(session: Session) -> list:
             InstrumentRow.id,
             InstrumentRow.native_frequency,
             SymbolMapRow.provider,
+            SymbolMapRow.priority,
             SymbolMapRow.source_frequency,
             SymbolMapRow.publication_lag_days,
         )
-        .order_by(InstrumentRow.id, SymbolMapRow.provider)
+        .order_by(InstrumentRow.id, SymbolMapRow.priority)
     ).fetchall()
 
 

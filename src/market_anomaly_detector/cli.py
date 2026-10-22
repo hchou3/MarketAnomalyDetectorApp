@@ -458,12 +458,15 @@ def _cmd_status(args: argparse.Namespace) -> int:
         if not live:
             no_live_source_insts.append(inst_id)
             continue
-        for r in live:
-            freq = r.source_frequency or r.native_frequency
-            lag = r.publication_lag_days or 0
-            if is_stale(r.last_obs_date, freq, today, lag):
-                last_str = str(r.last_obs_date) if r.last_obs_date else "never"
-                stale_insts.append((inst_id, r.provider, last_str))
+        # Check only the priority-1 (lowest priority number) source.
+        # Lower-priority fallbacks are only fetched when priority-1 fails,
+        # so they are not independently stale.
+        priority_1 = min(live, key=lambda r: r.priority if r.priority is not None else 999)
+        freq = priority_1.source_frequency or priority_1.native_frequency
+        lag = priority_1.publication_lag_days or 0
+        if is_stale(priority_1.last_obs_date, freq, today, lag):
+            last_str = str(priority_1.last_obs_date) if priority_1.last_obs_date else "never"
+            stale_insts.append((inst_id, priority_1.provider, last_str))
 
     n_with_live = len(_by_inst) - len(no_live_source_insts)
     print(f"\n=== Stale instruments ({len(stale_insts)} of {n_with_live}) ===")
@@ -567,6 +570,61 @@ _TIMING_INSTRUMENT_IDS = [
     "msci_japan",
     "msci_japan_n225",
 ]
+
+
+def _cmd_revalidate(args: argparse.Namespace) -> int:
+    """Re-run validation over all stored price rows; replace stale flags."""
+    from sqlalchemy.orm import Session
+
+    from .db.engine import create_engine
+    from .db.repository import (
+        delete_quality_flags_for_source,
+        get_price_rows_as_df,
+        write_quality_flags,
+    )
+    from .registry import load_instruments
+    from .validation import validate_provider_output
+
+    try:
+        instruments = load_instruments()
+    except Exception as exc:
+        print(f"ERROR: loading registry: {exc}", file=sys.stderr)
+        return 1
+
+    try:
+        engine = create_engine(url=args.database_url)
+        _require_db_ready(engine)
+    except SystemExit:
+        return 2
+    except Exception as exc:
+        print(f"ERROR: database error: {exc}", file=sys.stderr)
+        return 1
+
+    total_deleted = 0
+    total_written = 0
+
+    with Session(engine) as session:
+        with session.begin():
+            for inst in instruments:
+                if not getattr(inst, "active", True):
+                    continue
+                live_sources = [
+                    s for s in inst.sources if s.provider != "bloomberg_ews" and s.symbol
+                ]
+                for source in live_sources:
+                    df = get_price_rows_as_df(session, inst.id, source.provider)
+                    if df.empty:
+                        continue
+                    _, flags = validate_provider_output(df, inst)
+                    deleted = delete_quality_flags_for_source(session, inst.id, source.provider)
+                    total_deleted += deleted
+                    write_quality_flags(
+                        session, flags, instrument_id=inst.id, provider=source.provider
+                    )
+                    total_written += len(flags)
+
+    print(f"revalidate: cleared {total_deleted} flag(s), wrote {total_written} flag(s).")
+    return 0
 
 
 def _cmd_timing_diagnostic(args: argparse.Namespace) -> int:
@@ -742,6 +800,13 @@ def main() -> None:
     )
     p.add_argument("--database-url", default=None, metavar="URL")
 
+    # ── revalidate ────────────────────────────────────────────────────────────
+    p = subparsers.add_parser(
+        "revalidate",
+        help="Re-run validation over all stored price rows and replace stale flags.",
+    )
+    p.add_argument("--database-url", default=None, metavar="URL")
+
     # ── timing-diagnostic ─────────────────────────────────────────────────────
     p = subparsers.add_parser(
         "timing-diagnostic",
@@ -793,6 +858,8 @@ def main() -> None:
         sys.exit(_cmd_parity_stress(args))
     elif args.command == "report":
         sys.exit(_cmd_report(args))
+    elif args.command == "revalidate":
+        sys.exit(_cmd_revalidate(args))
     elif args.command == "timing-diagnostic":
         sys.exit(_cmd_timing_diagnostic(args))
     else:

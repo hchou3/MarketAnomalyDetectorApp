@@ -39,8 +39,8 @@ _LARGE_MOVE_THRESHOLDS: dict[str, float] = {
 _DEFAULT_LARGE_MOVE_THRESHOLD = 0.50
 
 # Absolute change threshold in percentage points for percent-unit instruments.
-# 2 pp = 200 bp; a daily move larger than this is flagged for any rate/yield.
-_LARGE_MOVE_BP_THRESHOLD_PP: float = 2.0  # percentage points (= 200 bp)
+# 0.5 pp = 50 bp; a daily move larger than this is flagged for any rate/yield.
+_LARGE_MOVE_BP_THRESHOLD_PP: float = 0.5  # percentage points (= 50 bp)
 
 
 @dataclass
@@ -135,6 +135,33 @@ def validate_provider_output(
                             obs_date=obs_d,
                             rule="large_move",
                             detail=f"abs_change={chg_bp:.0f}bp ({prev_val:.6g} -> {val:.6g})",
+                        )
+                    )
+        elif allow_negative:
+            # Zero-centred indices (nfci, stlfsi, us_econ_surprise etc.): flag
+            # single-day changes > 4 rolling standard deviations.
+            abs_changes = sorted_df["value"].diff().abs()
+            rolling_std = sorted_df["value"].expanding(min_periods=8).std()
+            threshold_series = 4.0 * rolling_std
+            for idx in abs_changes.index:
+                if idx == 0:
+                    continue
+                thr = threshold_series.loc[idx]
+                chg = abs_changes.loc[idx]
+                if pd.isna(thr) or pd.isna(chg):
+                    continue
+                if chg > thr:
+                    obs_d = sorted_df.loc[idx, "obs_date"]
+                    val = float(sorted_df.loc[idx, "value"])
+                    prev_val = float(sorted_df.loc[idx - 1, "value"])
+                    flags.append(
+                        ValidationFlag(
+                            obs_date=obs_d,
+                            rule="large_move",
+                            detail=(
+                                f"abs_change={chg:.4g} > 4*std={thr:.4g}"
+                                f" ({prev_val:.6g} -> {val:.6g})"
+                            ),
                         )
                     )
         else:

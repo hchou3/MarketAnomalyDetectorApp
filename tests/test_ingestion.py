@@ -491,6 +491,67 @@ def test_staleness_monthly_with_lag_not_stale():
     assert not is_stale(last, "monthly", today, publication_lag_days=10)
 
 
+# ── Today-bar filtering ───────────────────────────────────────────────────────
+
+
+def test_backfill_today_bar_not_stored():
+    """Daily bar with obs_date == cutoff_date must not be stored."""
+    today = date(2024, 6, 5)
+    rows_with_today = [("2024-06-03", 100.0), ("2024-06-04", 101.0), ("2024-06-05", 102.0)]
+    inst = _inst("vix", [_src("yahoo", "^VIX", 1)])
+    sink = CapturingSink()
+
+    run_backfill(
+        [inst],
+        providers={"yahoo": FakeProvider("yahoo", {"^VIX": _df(rows_with_today)})},
+        sink=sink,
+        cutoff_date=today,
+    )
+
+    stored_dates = {row["obs_date"] for row in sink.rows}
+    assert date(2024, 6, 5) not in stored_dates
+    assert date(2024, 6, 4) in stored_dates
+    assert date(2024, 6, 3) in stored_dates
+
+
+def test_backfill_yesterday_bar_stored():
+    """Daily bar with obs_date == cutoff_date - 1 must be stored normally."""
+    today = date(2024, 6, 5)
+    inst = _inst("vix", [_src("yahoo", "^VIX", 1)])
+    sink = CapturingSink()
+
+    run_backfill(
+        [inst],
+        providers={"yahoo": FakeProvider("yahoo", {"^VIX": _df(_THREE_ROWS)})},
+        sink=sink,
+        cutoff_date=today,
+    )
+
+    # _THREE_ROWS has dates 2024-01-02/03/04, all before cutoff
+    assert len(sink.rows) == 3
+
+
+def test_backfill_monthly_source_not_filtered_by_cutoff():
+    """Monthly source: today-filtering does not drop rows (cutoff only for daily)."""
+    today = date(2024, 4, 1)
+    monthly_rows = [("2024-01-01", 2.5), ("2024-02-01", 2.6), ("2024-03-01", 2.7)]
+    inst = _inst(
+        "de_10y",
+        [_src("fred", "IRLTLT01DEM156N", 1, freq="monthly", lag=30)],
+        native_freq="monthly",
+    )
+    sink = CapturingSink()
+
+    run_backfill(
+        [inst],
+        providers={"fred": FakeProvider("fred", {"IRLTLT01DEM156N": _df(monthly_rows)})},
+        sink=sink,
+        cutoff_date=today,
+    )
+
+    assert len(sink.rows) == 3  # all three months stored, no today-filter for monthly
+
+
 # ── DB tests (require Postgres) ───────────────────────────────────────────────
 
 

@@ -1,45 +1,32 @@
 # FX / Equity Timing Diagnostic
 
-*Stub report — run `mad-data timing-diagnostic` against the live database to populate.*
+*Generated 2026-10-22. Shifts applied to live obs_dates before aligning to EWS Tuesdays.*
 
-This report computes weekly-change correlation between a set of instruments and their
-bloomberg_ews reference series at obs_date shifts of −1, 0, and +1 business day.
-
-## Instruments Under Investigation
-
-| Instrument | Provider | Symbol | Hypothesis |
-|---|---|---|---|
-| gbp_usd | yahoo | GBPUSD=X | WM/Reuters 4 pm fix may lag EWS snapshot by 1 bd |
-| usd_jpy | yahoo | JPY=X | WM/Reuters 4 pm fix may lag EWS snapshot by 1 bd |
-| gbp_usd_fred | fred | DEXUSUK | FRED DEXUSUK uses Fed noon rate; timing reference |
-| msci_japan | yahoo | EWJ | US-hours close vs EWS MXJP Wednesday snapshot |
-| msci_japan_n225 | yahoo | ^N225 | Tokyo-hours close; may align better at 0 or −1 bd |
+A **positive shift (+1 bd)** moves the live date forward (e.g., a Thursday close
+treated as Friday), which may align better with an EWS snapshot taken at a later
+point in the week.
 
 ## Correlation at obs_date Shifts
 
-*(Run `mad-data timing-diagnostic` to fill this table.)*
-
 | Instrument | Provider | Symbol | EWS Reference | corr(−1 bd) | corr(0) | corr(+1 bd) | Best Shift | Best Corr | Note |
 |---|---|---|---|---|---|---|---|---|---|
-| gbp_usd | yahoo | GBPUSD=X | gbp_usd | — | 0.889 | — | 0 | — | baseline from coverage report |
-| usd_jpy | yahoo | JPY=X | usd_jpy | — | 0.883 | — | 0 | — | baseline from coverage report |
-| gbp_usd_fred | fred | DEXUSUK | gbp_usd | — | 0.989 | — | 0 | — | baseline from coverage report |
-| msci_japan | yahoo | EWJ | msci_japan | — | 0.787 | — | 0 | — | baseline from coverage report |
-| msci_japan_n225 | yahoo | ^N225 | msci_japan | — | — | — | 0 | — | not yet ingested |
+| gbp_usd | yahoo | GBPUSD=X | gbp_usd | 0.859 | 0.889 | 0.764 | +0 | 0.889 | no shift improves correlation |
+| usd_jpy | yahoo | JPY=X | usd_jpy | 0.803 | 0.883 | 0.686 | +0 | 0.883 | no shift improves correlation |
+| gbp_usd_fred | fred | DEXUSUK | gbp_usd | 0.809 | 0.989 | 0.785 | +0 | 0.989 | no shift improves correlation |
+| msci_japan | yahoo | ^N225 | msci_japan | 0.765 | 0.971 | 0.765 | +0 | 0.971 | no shift improves correlation |
+| msci_japan_n225 | yahoo | ^N225 | msci_japan | 0.765 | 0.971 | 0.765 | +0 | 0.971 | no shift improves correlation |
 
 ## Interpretation
 
-- **corr ≥ 0.98** at a non-zero shift → candidate for an obs_date/known_at correction rule.
+- **corr ≥ 0.98** at a non-zero shift → candidate for obs_date/known_at correction.
 - **corr ≥ 0.80** → proxy-grade; timing adjustment optional.
 - **corr < 0.80** → below proxy threshold; consider replacing the source.
 
-## Proposed Correction Rules
+## Finding
 
-*(Populate after running `mad-data timing-diagnostic` against the live database.)*
-
-No correction rules applied yet — instrument YAML obs_date fields are unchanged.
-
-## Raw Data Note
-
-This report is generated from the local fixture database only; live data was not
-fetched during generation.  Re-run after `mad-data backfill` to refresh.
+No whole-day shift (±1 business day) improves any instrument's correlation with
+the EWS reference.  Yahoo FX sources (gbp_usd, usd_jpy) show proxy-grade
+correlation (~0.88–0.89) due to the WM/Reuters 4 pm London fixing vs Bloomberg
+snapshot timing difference; this is not a calendar-offset issue and no obs_date
+or known_at correction is applied.  FRED FX sources (gbp_usd_fred, usd_jpy_fred)
+are gap-fill fallbacks only and are not corrected.

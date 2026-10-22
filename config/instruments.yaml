@@ -182,9 +182,10 @@
   valid_from: null
   valid_to: null
   notes: >
-    fidelity-override: Yahoo WM/Reuters 4 pm London fix may misalign with
-    EWS JPY snapshot; baseline corr 0.883 (proxy-level). Timing-diagnostic
-    under investigation; see docs/reports/timing-diagnostic.md.
+    fidelity-override: Yahoo WM/Reuters 4 pm London fix closes ~midnight
+    London; baseline corr 0.883 (proxy-level). No whole-day shift (±1 bd)
+    improves alignment. Yahoo stays primary for train/serve consistency;
+    FRED (usd_jpy_fred) is gap-fill fallback only.
 
 - id: gbp_usd
   name: British pound / US dollar
@@ -213,9 +214,10 @@
   valid_from: null
   valid_to: null
   notes: >
-    fidelity-override: Yahoo WM/Reuters 4 pm London fix may misalign with
-    EWS GBP snapshot; baseline corr 0.889 (proxy-level). Timing-diagnostic
-    under investigation; see docs/reports/timing-diagnostic.md.
+    fidelity-override: Yahoo WM/Reuters 4 pm London fix closes ~midnight
+    London; baseline corr 0.889 (proxy-level). No whole-day shift (±1 bd)
+    improves alignment. Yahoo stays primary for train/serve consistency;
+    FRED (gbp_usd_fred) is gap-fill fallback only.
 
 - id: gbp_usd_fred
   name: GBP/USD history proxy — FRED DEXUSUK
@@ -452,7 +454,7 @@
       priority: 1
       fidelity: proxy
       source_frequency: monthly
-      publication_lag_days: 40
+      publication_lag_days: 28
       notes: OECD monthly series; published ~5-6 weeks after month end. Best available public source for the Bund.
     - provider: bloomberg_ews
       symbol: GTDEM10Y
@@ -526,7 +528,7 @@
       priority: 1
       fidelity: proxy
       source_frequency: monthly
-      publication_lag_days: 40
+      publication_lag_days: 28
       notes: OECD monthly series; published ~5-6 weeks after month end.
     - provider: bloomberg_ews
       symbol: GTITL10YR
@@ -586,7 +588,7 @@
       priority: 1
       fidelity: proxy
       source_frequency: monthly
-      publication_lag_days: 40
+      publication_lag_days: 28
       notes: OECD monthly series; published ~5-6 weeks after month end.
     - provider: bloomberg_ews
       symbol: GTJPY10YR
@@ -994,6 +996,7 @@
 - id: msci_japan_n225
   name: MSCI Japan proxy — Nikkei 225 Index (^N225, standalone)
   reference_instrument: msci_japan
+  active: false
   asset_class: equity_index
   groups: [equity_index]
   units: index_points
