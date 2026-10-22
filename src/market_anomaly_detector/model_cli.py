@@ -782,6 +782,46 @@ def _cmd_select(args: argparse.Namespace) -> int:
         return 1
 
 
+# ── confirm ───────────────────────────────────────────────────────────────────
+
+
+def _cmd_confirm(args: argparse.Namespace) -> int:
+    from pathlib import Path
+
+    from sqlalchemy.orm import Session
+
+    from .confirm import N_BOOT as CONF_N_BOOT
+    from .confirm import run_confirm
+    from .db.engine import create_engine
+
+    out_dir = Path(args.out_dir) if args.out_dir else _REPORTS_DIR
+    n_boot = 0 if args.no_boot else (args.n_boot or CONF_N_BOOT)
+
+    if args.force and not args.reason:
+        print("ERROR: --force requires --reason <text>", file=sys.stderr)
+        return 1
+
+    try:
+        engine = create_engine(url=args.database_url)
+        with Session(engine) as session:
+            _require_db_ready(engine)
+            return run_confirm(
+                session=session,
+                out_dir=out_dir,
+                label_set=args.label_set,
+                n_boot=n_boot,
+                csv_path=Path(args.csv) if args.csv else None,
+                skip_bootstrap=args.no_boot,
+                force=args.force,
+                force_reason=args.reason,
+            )
+    except SystemExit:
+        raise
+    except Exception as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+
+
 # ── main ──────────────────────────────────────────────────────────────────────
 
 
@@ -1020,6 +1060,52 @@ def main() -> None:
         help="Path to old EWS CSV for evaluating old baselines (optional).",
     )
 
+    # ── confirm ────────────────────────────────────────────────────────────────
+    pc = subparsers.add_parser(
+        "confirm",
+        help=(
+            "Run the selected model (hgb) on the 2018–2021 held-out confirmation folds "
+            "and write docs/reports/<date>-final-confirmation-<hash>.md. Run once."
+        ),
+    )
+    pc.add_argument("--label-set", default="ews_v1", metavar="NAME")
+    pc.add_argument("--database-url", default=None, metavar="URL")
+    pc.add_argument(
+        "--csv",
+        default=None,
+        metavar="PATH",
+        help="Path to old EWS CSV for old_ensemble baseline (optional).",
+    )
+    pc.add_argument(
+        "--out-dir",
+        default=None,
+        metavar="DIR",
+        help="Directory to write the report (default: docs/reports/).",
+    )
+    pc.add_argument(
+        "--no-boot",
+        action="store_true",
+        help="Skip year-block bootstrap.",
+    )
+    pc.add_argument(
+        "--n-boot",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Bootstrap resamples (default: 2000).",
+    )
+    pc.add_argument(
+        "--force",
+        action="store_true",
+        help="Override run-once guard (requires --reason).",
+    )
+    pc.add_argument(
+        "--reason",
+        default="",
+        metavar="TEXT",
+        help="Reason for --force override (required when --force is set).",
+    )
+
     args = parser.parse_args()
     if args.command == "episodes":
         sys.exit(_cmd_episodes(args))
@@ -1033,6 +1119,8 @@ def main() -> None:
         sys.exit(_cmd_hgb_experiments(args))
     elif args.command == "select":
         sys.exit(_cmd_select(args))
+    elif args.command == "confirm":
+        sys.exit(_cmd_confirm(args))
     else:
         parser.print_help()
         sys.exit(1)
