@@ -140,13 +140,41 @@ SPEC_V1: list[FeatureSpec] = [
         "usdjpy_z_1w", "USD/JPY, z-score of 1w return (156w)", "usd_jpy", "price", "z_score", 156
     ),
     # ── GBP/USD (price) ───────────────────────────────────────────────────────
-    FeatureSpec("gbpusd_lr_1w", "GBP/USD, 1-week log return", "gbp_usd", "price", "log_return", 1),
-    FeatureSpec("gbpusd_lr_4w", "GBP/USD, 4-week log return", "gbp_usd", "price", "log_return", 4),
     FeatureSpec(
-        "gbpusd_lr_12w", "GBP/USD, 12-week log return", "gbp_usd", "price", "log_return", 12
+        "gbpusd_lr_1w",
+        "GBP/USD, 1-week log return",
+        "gbp_usd",
+        "price",
+        "log_return",
+        1,
+        fallback_instrument_ids=["gbp_usd_fred"],
     ),
     FeatureSpec(
-        "gbpusd_z_1w", "GBP/USD, z-score of 1w return (156w)", "gbp_usd", "price", "z_score", 156
+        "gbpusd_lr_4w",
+        "GBP/USD, 4-week log return",
+        "gbp_usd",
+        "price",
+        "log_return",
+        4,
+        fallback_instrument_ids=["gbp_usd_fred"],
+    ),
+    FeatureSpec(
+        "gbpusd_lr_12w",
+        "GBP/USD, 12-week log return",
+        "gbp_usd",
+        "price",
+        "log_return",
+        12,
+        fallback_instrument_ids=["gbp_usd_fred"],
+    ),
+    FeatureSpec(
+        "gbpusd_z_1w",
+        "GBP/USD, z-score of 1w return (156w)",
+        "gbp_usd",
+        "price",
+        "z_score",
+        156,
+        fallback_instrument_ids=["gbp_usd_fred"],
     ),
     # ── Gold (price) ──────────────────────────────────────────────────────────
     FeatureSpec("gold_lr_1w", "Gold, 1-week log return", "gold", "price", "log_return", 1),

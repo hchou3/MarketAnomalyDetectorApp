@@ -43,6 +43,7 @@
   units: price
   quote: USD per barrel
   native_frequency: daily
+  allow_negative: true
   sources:
     - provider: yahoo
       symbol: "CL=F"
@@ -60,7 +61,7 @@
       fidelity: exact
   valid_from: null
   valid_to: null
-  notes: ""
+  notes: WTI front-month futures can briefly go negative at contract roll (April 2020).
 
 - id: crb_commodity
   name: Thomson Reuters/CoreCommodity CRB Index
@@ -92,6 +93,7 @@
   units: index_points
   quote: Index level; higher = stronger commodity prices
   native_frequency: daily
+  active: false
   sources:
     - provider: yahoo
       symbol: "^BCOM"
@@ -108,8 +110,8 @@
   valid_from: null
   valid_to: null
   notes: >
-    Proxy for crb_commodity. Use as fallback_instrument_id in FeatureSpec to extend
-    coverage before DBC's 2006 start.
+    Inactive: Yahoo Finance does not carry ^BCOM data. Entry kept for reference.
+    Re-activate if a working data source for the Bloomberg Commodity Index is found.
 
 - id: baltic_dry
   name: Baltic Dry Index
@@ -206,6 +208,33 @@
   valid_from: null
   valid_to: null
   notes: ""
+
+- id: gbp_usd_fred
+  name: GBP/USD history proxy — FRED DEXUSUK
+  reference_instrument: gbp_usd
+  asset_class: fx
+  groups: [fx]
+  units: price
+  quote: USD per GBP; higher = stronger GBP
+  native_frequency: daily
+  sources:
+    - provider: fred
+      symbol: DEXUSUK
+      priority: 1
+      fidelity: exact
+      publication_lag_days: 10
+      notes: >
+        H.10 release. FRED DEXUSUK carries USD/GBP data back to 1971-01-04,
+        before Yahoo Finance's reliable start of ~2003-12-01. Use as
+        fallback_instrument_id in FeatureSpec entries for gbp_usd to extend
+        history before Yahoo's start. The gbp_usd instrument also has FRED at
+        priority 2 for live-ingestion fallback; this proxy exists specifically
+        for the FeatureSpec cross-instrument splice path.
+  valid_from: null
+  valid_to: null
+  notes: >
+    Proxy for gbp_usd. Will fill pre-2003 history once FRED is backfilled.
+    Use as fallback_instrument_id in FeatureSpec entries for gbp_usd features.
 
 # ── Volatility ─────────────────────────────────────────────────────────────────
 
@@ -1070,6 +1099,7 @@
   units: index_points
   quote: Z-score; positive = data beat expectations
   native_frequency: daily
+  allow_negative: true
   sources:
     - provider: bloomberg_ews
       symbol: ECSURPUS
@@ -1102,6 +1132,28 @@
   valid_from: null
   valid_to: null
   notes: ""
+
+- id: vix3m_yahoo
+  name: VIX3M history proxy — Yahoo Finance (^VIX3M)
+  reference_instrument: vix3m
+  asset_class: volatility
+  groups: [stress_indicator, volatility]
+  units: index_points
+  quote: 93-day implied vol of S&P 500, annualised
+  native_frequency: daily
+  sources:
+    - provider: yahoo
+      symbol: "^VIX3M"
+      priority: 1
+      fidelity: exact
+  valid_from: null
+  valid_to: null
+  notes: >
+    Proxy for vix3m. Yahoo Finance carries ^VIX3M back to ~2003-01-02, before
+    Cboe's official publication start of 2009-09-18. Use as fallback_instrument_id
+    in FeatureSpec entries for vix3m to extend history before 2009-09-18.
+    The vix3m instrument also has yahoo at priority 2 for live-ingestion fallback;
+    this proxy exists specifically for the FeatureSpec cross-instrument splice path.
 
 - id: vix9d
   name: CBOE 9-Day Volatility Index (VIX9D)
@@ -1210,6 +1262,7 @@
   units: index_points
   quote: Z-score; positive = tighter/riskier conditions than average
   native_frequency: weekly
+  allow_negative: true
   sources:
     - provider: fred
       symbol: NFCI
@@ -1233,6 +1286,7 @@
   units: index_points
   quote: Z-score; positive = above-average financial stress
   native_frequency: weekly
+  allow_negative: true
   sources:
     - provider: fred
       symbol: STLFSI4

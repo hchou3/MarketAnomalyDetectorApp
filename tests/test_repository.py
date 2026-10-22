@@ -23,6 +23,7 @@ from market_anomaly_detector.db.repository import (
     get_last_price_date,
     get_last_run,
     get_price_coverage,
+    get_source_last_dates,
     start_run,
     sync_registry,
     upsert_labels,
@@ -199,7 +200,7 @@ def test_upsert_prices_inserts_rows(db_session):
             run_id=None,
         )
     ]
-    n_new, n_revised = upsert_prices(db_session, rows)
+    n_new, n_revised, *_ = upsert_prices(db_session, rows)
     db_session.flush()
     assert n_new == 1
     assert n_revised == 0
@@ -226,15 +227,17 @@ def test_upsert_prices_updates_existing(db_session):
         known_at=date(2023, 2, 2),
         run_id=None,
     )
-    n1_new, n1_revised = upsert_prices(db_session, [{**base, "value": Decimal("100.0")}])
+    n1_new, n1_revised, *_ = upsert_prices(db_session, [{**base, "value": Decimal("100.0")}])
     db_session.flush()
     assert n1_new == 1
     assert n1_revised == 0
 
-    n2_new, n2_revised = upsert_prices(db_session, [{**base, "value": Decimal("200.0")}])
+    result2 = upsert_prices(db_session, [{**base, "value": Decimal("200.0")}])
     db_session.flush()
-    assert n2_new == 0  # not a new insert — existing row was updated
-    assert n2_revised == 1  # value changed → revision
+    assert result2.rows_new == 0  # not a new insert — existing row was updated
+    assert result2.rows_revised == 1  # value changed → revision
+    assert result2.max_abs_revision == pytest.approx(100.0)
+    assert result2.max_rel_revision == pytest.approx(1.0)  # 100% relative change
 
     from sqlalchemy import select
 
@@ -261,15 +264,17 @@ def test_upsert_prices_repeated_load_returns_zero(db_session):
         known_at=date(2023, 3, 2),
         run_id=None,
     )
-    n1_new, n1_revised = upsert_prices(db_session, [row])
+    n1_new, n1_revised, *_ = upsert_prices(db_session, [row])
     db_session.flush()
     assert n1_new == 1
     assert n1_revised == 0
 
-    n2_new, n2_revised = upsert_prices(db_session, [row])
+    r2 = upsert_prices(db_session, [row])
     db_session.flush()
-    assert n2_new == 0
-    assert n2_revised == 0
+    assert r2.rows_new == 0
+    assert r2.rows_revised == 0
+    assert r2.max_abs_revision is None
+    assert r2.max_rel_revision is None
 
 
 @pytest.mark.db
@@ -324,7 +329,7 @@ def test_upsert_prices_large_batch(db_session):
         )
         for i in range(n_rows)
     ]
-    n_new, n_revised = upsert_prices(db_session, rows)
+    n_new, n_revised, *_ = upsert_prices(db_session, rows)
     db_session.flush()
     assert n_new == n_rows
     assert n_revised == 0
@@ -556,15 +561,16 @@ def test_update_after_full_backfill_writes_nothing(db_session):
         )
         for d in range(2, 6)  # Jan 2–5
     ]
-    n_new, n_revised = upsert_prices(db_session, rows)
+    n_new, n_revised, *_ = upsert_prices(db_session, rows)
     db_session.flush()
     assert n_new == 4
 
-    # "Update" = upsert the same rows again — must be (0, 0)
-    n2_new, n2_revised = upsert_prices(db_session, rows)
+    # "Update" = upsert the same rows again — must be (0, 0, None, None)
+    r2 = upsert_prices(db_session, rows)
     db_session.flush()
-    assert n2_new == 0
-    assert n2_revised == 0
+    assert r2.rows_new == 0
+    assert r2.rows_revised == 0
+    assert r2.max_abs_revision is None
 
 
 @pytest.mark.db
@@ -582,14 +588,16 @@ def test_update_changed_value_counts_as_revision(db_session):
         known_at=date(2024, 3, 2),
         run_id=None,
     )
-    n_new, _ = upsert_prices(db_session, [{**base, "value": Decimal("100.0")}])
+    n_new, *_ = upsert_prices(db_session, [{**base, "value": Decimal("100.0")}])
     db_session.flush()
     assert n_new == 1
 
-    n2_new, n2_revised = upsert_prices(db_session, [{**base, "value": Decimal("101.5")}])
+    r2 = upsert_prices(db_session, [{**base, "value": Decimal("101.5")}])
     db_session.flush()
-    assert n2_new == 0
-    assert n2_revised == 1
+    assert r2.rows_new == 0
+    assert r2.rows_revised == 1
+    assert r2.max_abs_revision == pytest.approx(1.5)
+    assert r2.max_rel_revision == pytest.approx(0.015)
 
 
 # ── add_run_item rows_new / rows_revised ──────────────────────────────────────
@@ -689,3 +697,9 @@ def test_status_queries_with_data(db_session):
     assert len(last_dates) == 1
     assert last_dates[0].id == "status_inst"
     assert last_dates[0].last_obs_date == date(2024, 1, 4)
+
+    source_dates = get_source_last_dates(db_session)
+    assert len(source_dates) == 1
+    assert source_dates[0].id == "status_inst"
+    assert source_dates[0].provider == "yahoo"
+    assert source_dates[0].last_obs_date == date(2024, 1, 4)

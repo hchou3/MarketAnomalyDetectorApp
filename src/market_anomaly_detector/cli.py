@@ -51,7 +51,11 @@ def _build_providers(instruments):
 def _active_instruments(instruments, today=None):
     if today is None:
         today = date.today()
-    return [i for i in instruments if not i.valid_to or date.fromisoformat(i.valid_to) >= today]
+    return [
+        i
+        for i in instruments
+        if i.active and (not i.valid_to or date.fromisoformat(i.valid_to) >= today)
+    ]
 
 
 # ── sync-registry ─────────────────────────────────────────────────────────────
@@ -196,6 +200,13 @@ def _cmd_backfill(args: argparse.Namespace) -> int:
                         first_date=r.first_date,
                         last_date=r.last_date,
                     )
+                    if r.rows_revised > 0:
+                        detail = f"  [{r.instrument_id}/{r.provider}] {r.rows_revised} revised"
+                        if r.max_abs_revision is not None:
+                            detail += f", max_abs={r.max_abs_revision:.4g}"
+                        if r.max_rel_revision is not None:
+                            detail += f", max_rel={r.max_rel_revision:.2%}"
+                        print(detail)
                 elif r.status == "error":
                     failed += 1
                     add_run_item(
@@ -316,6 +327,13 @@ def _cmd_update(args: argparse.Namespace) -> int:
                         first_date=r.first_date,
                         last_date=r.last_date,
                     )
+                    if r.rows_revised > 0:
+                        detail = f"  [{r.instrument_id}/{r.provider}] {r.rows_revised} revised"
+                        if r.max_abs_revision is not None:
+                            detail += f", max_abs={r.max_abs_revision:.4g}"
+                        if r.max_rel_revision is not None:
+                            detail += f", max_rel={r.max_rel_revision:.2%}"
+                        print(detail)
                 elif r.status == "error":
                     failed += 1
                     add_run_item(
@@ -362,9 +380,11 @@ def _cmd_status(args: argparse.Namespace) -> int:
     from .db.engine import create_engine
     from .db.repository import (
         get_flag_counts_by_rule,
-        get_instrument_last_dates,
+        get_flag_counts_per_instrument,
         get_last_run,
+        get_last_run_items,
         get_price_coverage,
+        get_source_last_dates,
     )
     from .ingestion import is_stale
 
@@ -373,9 +393,13 @@ def _cmd_status(args: argparse.Namespace) -> int:
         with Session(engine) as session:
             _require_db_ready(engine)
             last_run = get_last_run(session)
+            last_run_items = get_last_run_items(session, last_run.id) if last_run else []
             coverage = get_price_coverage(session)
             flag_counts = get_flag_counts_by_rule(session)
-            last_dates = get_instrument_last_dates(session)
+            flag_counts_per_inst = (
+                get_flag_counts_per_instrument(session) if getattr(args, "flags", False) else []
+            )
+            source_dates = get_source_last_dates(session)
     except Exception as exc:
         print(f"ERROR: database error: {exc}", file=sys.stderr)
         return 1
@@ -395,15 +419,47 @@ def _cmd_status(args: argparse.Namespace) -> int:
         print(f"  failed:   {last_run.instruments_failed} instruments")
         print(f"  rows:     {last_run.rows_written} total")
 
+        revised_items = [it for it in last_run_items if it.rows_revised > 0]
+        if revised_items:
+            print(
+                f"  revised:  {sum(it.rows_revised for it in revised_items)} rows across"
+                f" {len(revised_items)} instrument(s)"
+            )
+            for it in revised_items:
+                print(f"    {it.instrument_id}/{it.provider}: {it.rows_revised} revised")
+
     # ── Stale instruments ─────────────────────────────────────────────────────
-    stale_rows = [r for r in last_dates if is_stale(r.last_obs_date, r.native_frequency, today)]
-    print(f"\n=== Stale instruments ({len(stale_rows)} of {len(last_dates)}) ===")
-    if stale_rows:
-        for row in stale_rows:
-            last_str = str(row.last_obs_date) if row.last_obs_date else "never"
-            print(f"  {row.id:<24}  {row.native_frequency:<8}  last={last_str}")
+    # Group per-source rows by instrument.
+    _by_inst: dict = {}
+    for row in source_dates:
+        _by_inst.setdefault(row.id, []).append(row)
+
+    stale_insts: list[tuple[str, str, str]] = []  # (id, provider, last_str)
+    no_live_source_insts: list[str] = []
+    for inst_id, rows in _by_inst.items():
+        live = [r for r in rows if r.provider != "bloomberg_ews"]
+        if not live:
+            no_live_source_insts.append(inst_id)
+            continue
+        for r in live:
+            freq = r.source_frequency or r.native_frequency
+            lag = r.publication_lag_days or 0
+            if is_stale(r.last_obs_date, freq, today, lag):
+                last_str = str(r.last_obs_date) if r.last_obs_date else "never"
+                stale_insts.append((inst_id, r.provider, last_str))
+
+    n_with_live = len(_by_inst) - len(no_live_source_insts)
+    print(f"\n=== Stale instruments ({len(stale_insts)} of {n_with_live}) ===")
+    if stale_insts:
+        for inst_id, provider, last_str in stale_insts:
+            print(f"  {inst_id:<24}  {provider:<14}  last={last_str}")
     else:
         print("  None.")
+
+    if no_live_source_insts:
+        print(f"\n=== No live source ({len(no_live_source_insts)}) ===")
+        for inst_id in no_live_source_insts:
+            print(f"  {inst_id}")
 
     # ── Instrument coverage ───────────────────────────────────────────────────
     print(f"\n=== Instrument coverage ({len(coverage)} series) ===")
@@ -425,6 +481,63 @@ def _cmd_status(args: argparse.Namespace) -> int:
     else:
         print("  None.")
 
+    # ── Per-instrument flag breakdown (--flags) ───────────────────────────────
+    if getattr(args, "flags", False) and flag_counts_per_inst:
+        print("\n=== Flag counts per instrument ===")
+        for row in flag_counts_per_inst:
+            print(f"  {row.instrument_id:<24}  {row.rule:<32}  {row.count}")
+
+    return 0
+
+
+# ── report ────────────────────────────────────────────────────────────────────
+
+
+def _cmd_report(args: argparse.Namespace) -> int:
+    from pathlib import Path
+
+    from sqlalchemy.orm import Session
+
+    from .coverage import build_report, write_csv, write_markdown
+    from .db.engine import create_engine
+    from .paths import REPO_ROOT
+    from .registry import load_registry
+
+    try:
+        instruments = load_registry()
+    except Exception as exc:
+        print(f"ERROR: failed to load registry: {exc}", file=sys.stderr)
+        return 1
+    try:
+        engine = create_engine(url=args.database_url)
+        with Session(engine) as session:
+            _require_db_ready(engine)
+            report = build_report(session, instruments)
+    except Exception as exc:
+        print(f"ERROR: database error: {exc}", file=sys.stderr)
+        return 1
+    md_path = (
+        Path(args.output_md)
+        if args.output_md
+        else REPO_ROOT / "docs" / "reports" / "symbol-coverage.md"
+    )
+    csv_path = (
+        Path(args.output_csv)
+        if args.output_csv
+        else REPO_ROOT / "data" / "reports" / "symbol-coverage.csv"
+    )
+    try:
+        write_markdown(report, md_path)
+        write_csv(report, csv_path)
+    except Exception as exc:
+        print(f"ERROR: writing report: {exc}", file=sys.stderr)
+        return 1
+    mismatches = sum(1 for r in report.rows if r.fidelity_mismatch and not r.has_fidelity_override)
+    print(f"report: {len(report.rows)} instruments, {mismatches} mismatch(es).")
+    print(f"  {md_path}")
+    print(f"  {csv_path}")
+    if args.check and mismatches > 0:
+        return 1
     return 0
 
 
@@ -520,6 +633,25 @@ def main() -> None:
         "status",
         help="Show the last run summary, stale instruments, coverage, and quality flags.",
     )
+    p.add_argument(
+        "--flags",
+        action="store_true",
+        help="Also show flag counts per instrument and rule.",
+    )
+    p.add_argument("--database-url", default=None, metavar="URL")
+
+    # ── report ────────────────────────────────────────────────────────────────
+    p = subparsers.add_parser(
+        "report",
+        help="Build the symbol coverage report (Markdown + CSV).",
+    )
+    p.add_argument(
+        "--check",
+        action="store_true",
+        help="Exit 1 if any instrument has an unoverridden fidelity mismatch.",
+    )
+    p.add_argument("--output-md", default=None, metavar="PATH", dest="output_md")
+    p.add_argument("--output-csv", default=None, metavar="PATH", dest="output_csv")
     p.add_argument("--database-url", default=None, metavar="URL")
 
     # ── parity-stress ─────────────────────────────────────────────────────────
@@ -549,6 +681,8 @@ def main() -> None:
         sys.exit(_cmd_status(args))
     elif args.command == "parity-stress":
         sys.exit(_cmd_parity_stress(args))
+    elif args.command == "report":
+        sys.exit(_cmd_report(args))
     else:
         parser.print_help()
         sys.exit(1)

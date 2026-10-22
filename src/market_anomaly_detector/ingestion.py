@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import contextlib
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from typing import Any, Callable, Optional, Protocol, runtime_checkable
 
 import numpy as np
@@ -30,8 +30,8 @@ class PriceSink(Protocol):
     Postgres now; a Kafka producer in Phase 8.
     """
 
-    def write(self, rows: list[dict]) -> tuple[int, int]:
-        """Upsert *rows* and return ``(rows_new, rows_revised)``."""
+    def write(self, rows: list[dict]) -> tuple[int, int, Optional[float], Optional[float]]:
+        """Upsert *rows* and return ``(rows_new, rows_revised, max_abs, max_rel)``."""
         ...
 
 
@@ -41,10 +41,11 @@ class PostgresPriceSink:
     def __init__(self, session: Any) -> None:
         self._session = session
 
-    def write(self, rows: list[dict]) -> tuple[int, int]:
+    def write(self, rows: list[dict]) -> tuple[int, int, Optional[float], Optional[float]]:
         from .db.repository import upsert_prices
 
-        return upsert_prices(self._session, rows)
+        r = upsert_prices(self._session, rows)
+        return (r.rows_new, r.rows_revised, r.max_abs_revision, r.max_rel_revision)
 
 
 @dataclass
@@ -59,6 +60,8 @@ class InstrumentResult:
     first_date: Optional[date] = None
     last_date: Optional[date] = None
     error: Optional[str] = None
+    max_abs_revision: Optional[float] = None
+    max_rel_revision: Optional[float] = None
 
     @property
     def rows_written(self) -> int:
@@ -112,23 +115,29 @@ def is_stale(
     last_obs_date: Optional[date],
     native_frequency: str,
     today: Optional[date] = None,
+    publication_lag_days: int = 0,
 ) -> bool:
     """Return True if the instrument is overdue for an update.
 
     Thresholds: daily → 5 business days; weekly → 10 calendar days;
-    monthly → 45 calendar days.
+    monthly → 45 calendar days.  ``publication_lag_days`` shifts the
+    reference point backward so a series with a known release delay is
+    not false-positively flagged.
     """
     if today is None:
         today = date.today()
     if last_obs_date is None:
         return True
+    effective_today = today - timedelta(days=publication_lag_days)
+    if effective_today <= last_obs_date:
+        return False
     if native_frequency == "daily":
-        n_bdays = int(np.busday_count(last_obs_date.isoformat(), today.isoformat()))
+        n_bdays = int(np.busday_count(last_obs_date.isoformat(), effective_today.isoformat()))
         return n_bdays >= 5
     elif native_frequency == "weekly":
-        return (today - last_obs_date).days >= 10
+        return (effective_today - last_obs_date).days >= 10
     else:  # monthly
-        return (today - last_obs_date).days >= 45
+        return (effective_today - last_obs_date).days >= 45
 
 
 # ── Internal helpers ──────────────────────────────────────────────────────────
@@ -195,7 +204,9 @@ def _process_one(
                     lag=source.publication_lag_days,
                     run_id=run_id,
                 )
-                n_new, n_revised = sink.write(rows) if rows else (0, 0)
+                n_new, n_revised, max_abs, max_rel = (
+                    sink.write(rows) if rows else (0, 0, None, None)
+                )
                 if flags and session is not None:
                     from .db.repository import write_quality_flags
 
@@ -219,6 +230,8 @@ def _process_one(
                 first_date=rows[0]["obs_date"] if rows else None,
                 last_date=rows[-1]["obs_date"] if rows else None,
                 error=None,
+                max_abs_revision=max_abs,
+                max_rel_revision=max_rel,
             )
         errors.append(f"{source.provider}/{source.symbol}: {error_msg}")
 

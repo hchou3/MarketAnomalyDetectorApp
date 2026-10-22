@@ -127,6 +127,12 @@ class Instrument(BaseModel):
     # For proxy instruments: the canonical instrument whose EWS column this
     # proxies.  None for all primary instruments.
     reference_instrument: Optional[str] = None
+    # Set False to exclude this instrument from live ingestion and staleness checks.
+    active: bool = True
+    # Set True for instruments whose values are legitimately negative (e.g.
+    # economic surprise indices, rate spreads, real yields).  Suppresses the
+    # negative_value validation flag.
+    allow_negative: bool = False
 
     @field_validator("id")
     @classmethod

@@ -4,11 +4,13 @@ Rules applied in order:
   1. Non-numeric values — dropped silently (providers should already filter these).
   2. Duplicate obs_dates — exact duplicates deduplicated to first; conflicting
      duplicates (same date, different value) flagged as ``duplicate_dates_disagree``.
-  3. Negative values — flagged as ``negative_value`` unless the instrument's
-     asset_class is ``rate`` (yields can go negative) or its id is ``wti_front``
-     (crude oil can go negative).
-  4. Large single-day moves — flagged as ``large_move`` when abs(pct_change)
-     exceeds the per-asset-class threshold.
+  3. Negative values — flagged as ``negative_value`` only for price/index_points
+     instruments where the instrument does not set ``allow_negative=True``.
+     Percent-unit instruments (yields, rates, spreads) are always exempt.
+  4. Large single-day moves — flagged as ``large_move``.  For price/index_points
+     series, abs(pct_change) is compared against a per-asset-class relative
+     threshold.  For percent-unit series, the absolute change (in percentage
+     points, i.e. basis points / 100) is compared against a bp threshold.
 
 Flagged rows are *still written*; flags are advisory quality markers.
 """
@@ -21,13 +23,10 @@ from typing import Any
 
 import pandas as pd
 
-# Asset classes whose instruments may legitimately go negative
-_NEGATIVE_ALLOWED_ASSET_CLASSES: frozenset[str] = frozenset({"rate"})
+# Units for which negative values are expected (yields, rates, spreads, etc.)
+_PERCENT_UNITS: frozenset[str] = frozenset({"percent"})
 
-# Individual instrument IDs that may go negative (commodity futures at expiry)
-_NEGATIVE_ALLOWED_INSTRUMENTS: frozenset[str] = frozenset({"wti_front"})
-
-# abs(pct_change) threshold above which a single-day move is flagged
+# abs(pct_change) threshold for price/index_points instruments
 _LARGE_MOVE_THRESHOLDS: dict[str, float] = {
     "equity_index": 0.15,
     "fx": 0.10,
@@ -38,6 +37,10 @@ _LARGE_MOVE_THRESHOLDS: dict[str, float] = {
     "macro_index": 0.50,
 }
 _DEFAULT_LARGE_MOVE_THRESHOLD = 0.50
+
+# Absolute change threshold in percentage points for percent-unit instruments.
+# 2 pp = 200 bp; a daily move larger than this is flagged for any rate/yield.
+_LARGE_MOVE_BP_THRESHOLD_PP: float = 2.0  # percentage points (= 200 bp)
 
 
 @dataclass
@@ -95,17 +98,16 @@ def validate_provider_output(
         df = df.drop_duplicates(subset="obs_date", keep="first")
 
     # ── 3. Negative values ────────────────────────────────────────────────────
+    # Only flag for price/index_points instruments unless allow_negative is set.
+    units = instrument.units.value if hasattr(instrument.units, "value") else str(instrument.units)
     asset_class = (
         instrument.asset_class.value
         if hasattr(instrument.asset_class, "value")
         else str(instrument.asset_class)
     )
-    inst_id = instrument.id
+    allow_negative = getattr(instrument, "allow_negative", False)
 
-    if (
-        asset_class not in _NEGATIVE_ALLOWED_ASSET_CLASSES
-        and inst_id not in _NEGATIVE_ALLOWED_INSTRUMENTS
-    ):
+    if units not in _PERCENT_UNITS and not allow_negative:
         neg_rows = df[df["value"] < 0]
         for _, row in neg_rows.iterrows():
             flags.append(
@@ -117,22 +119,39 @@ def validate_provider_output(
             )
 
     # ── 4. Large single-day moves ─────────────────────────────────────────────
-    threshold = _LARGE_MOVE_THRESHOLDS.get(asset_class, _DEFAULT_LARGE_MOVE_THRESHOLD)
     if len(df) > 1:
         sorted_df = df.sort_values("obs_date").reset_index(drop=True)
-        pct_changes = sorted_df["value"].pct_change().abs()
-        for idx in pct_changes[pct_changes > threshold].index:
-            if idx > 0:
-                obs_d = sorted_df.loc[idx, "obs_date"]
-                val = float(sorted_df.loc[idx, "value"])
-                prev_val = float(sorted_df.loc[idx - 1, "value"])
-                pct = float(pct_changes.loc[idx])
-                flags.append(
-                    ValidationFlag(
-                        obs_date=obs_d,
-                        rule="large_move",
-                        detail=f"pct_change={pct:.1%} ({prev_val:.6g} -> {val:.6g})",
+        if units in _PERCENT_UNITS:
+            # For yield/rate series use absolute change in percentage points.
+            abs_changes = sorted_df["value"].diff().abs()
+            for idx in abs_changes[abs_changes > _LARGE_MOVE_BP_THRESHOLD_PP].index:
+                if idx > 0:
+                    obs_d = sorted_df.loc[idx, "obs_date"]
+                    val = float(sorted_df.loc[idx, "value"])
+                    prev_val = float(sorted_df.loc[idx - 1, "value"])
+                    chg_bp = float(abs_changes.loc[idx]) * 100  # pp → bp
+                    flags.append(
+                        ValidationFlag(
+                            obs_date=obs_d,
+                            rule="large_move",
+                            detail=f"abs_change={chg_bp:.0f}bp ({prev_val:.6g} -> {val:.6g})",
+                        )
                     )
-                )
+        else:
+            threshold = _LARGE_MOVE_THRESHOLDS.get(asset_class, _DEFAULT_LARGE_MOVE_THRESHOLD)
+            pct_changes = sorted_df["value"].pct_change().abs()
+            for idx in pct_changes[pct_changes > threshold].index:
+                if idx > 0:
+                    obs_d = sorted_df.loc[idx, "obs_date"]
+                    val = float(sorted_df.loc[idx, "value"])
+                    prev_val = float(sorted_df.loc[idx - 1, "value"])
+                    pct = float(pct_changes.loc[idx])
+                    flags.append(
+                        ValidationFlag(
+                            obs_date=obs_d,
+                            rule="large_move",
+                            detail=f"pct_change={pct:.1%} ({prev_val:.6g} -> {val:.6g})",
+                        )
+                    )
 
     return df.reset_index(drop=True), flags

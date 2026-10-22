@@ -17,16 +17,22 @@ from market_anomaly_detector.registry import (
 from market_anomaly_detector.validation import validate_provider_output
 
 
-def _inst(id_: str = "test_inst", asset_class: AssetClass = AssetClass.equity_index) -> Instrument:
+def _inst(
+    id_: str = "test_inst",
+    asset_class: AssetClass = AssetClass.equity_index,
+    units: Units = Units.index_points,
+    allow_negative: bool = False,
+) -> Instrument:
     return Instrument(
         id=id_,
         name="Test",
         asset_class=asset_class,
         groups=["test"],
-        units=Units.index_points,
+        units=units,
         quote="points",
         native_frequency=Frequency.daily,
         sources=[SourceEntry(provider="yahoo", symbol="TEST", priority=1, fidelity=Fidelity.exact)],
+        allow_negative=allow_negative,
     )
 
 
@@ -86,7 +92,9 @@ def test_validate_negative_flagged_for_equity_index():
 def test_validate_negative_allowed_for_rate():
     """Negative rates (yields) should not be flagged."""
     df = _df([("2024-01-02", 5.0), ("2024-01-03", -0.5)])
-    clean, flags = validate_provider_output(df, _inst(asset_class=AssetClass.rate))
+    clean, flags = validate_provider_output(
+        df, _inst(asset_class=AssetClass.rate, units=Units.percent)
+    )
     assert not [f for f in flags if f.rule == "negative_value"]
     assert len(clean) == 2
 
@@ -102,6 +110,7 @@ def test_validate_negative_allowed_for_wti_front():
         quote="USD/bbl",
         native_frequency=Frequency.daily,
         sources=[SourceEntry(provider="yahoo", symbol="CL=F", priority=1, fidelity=Fidelity.exact)],
+        allow_negative=True,
     )
     df = _df([("2020-04-20", -37.63), ("2020-04-21", 10.0)])
     clean, flags = validate_provider_output(df, inst)

@@ -7,7 +7,7 @@ constructs raw INSERT/UPDATE statements.
 from __future__ import annotations
 
 from datetime import date, datetime, timezone
-from typing import Optional
+from typing import NamedTuple, Optional
 
 from sqlalchemy import delete, func, literal_column, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -29,6 +29,13 @@ from .models import (
 # Chunk sizes are chosen conservatively well below that limit.
 _PRICE_CHUNK = 5_000  # 7 params/row → max 9,362; use 5,000
 _LABEL_CHUNK = 5_000  # 4 params/row → max 16,383; use 5,000
+
+
+class UpsertResult(NamedTuple):
+    rows_new: int
+    rows_revised: int
+    max_abs_revision: Optional[float]
+    max_rel_revision: Optional[float]
 
 
 def _chunks(lst: list, size: int):
@@ -63,7 +70,7 @@ def sync_registry(session: Session, instruments: list[Instrument]) -> None:
                 valid_from=_parse_date(inst.valid_from),
                 valid_to=_parse_date(inst.valid_to),
                 notes=inst.notes,
-                active=True,
+                active=inst.active,
             )
             .on_conflict_do_update(
                 index_elements=["id"],
@@ -76,7 +83,7 @@ def sync_registry(session: Session, instruments: list[Instrument]) -> None:
                     "valid_from": pg_insert(InstrumentRow).excluded.valid_from,
                     "valid_to": pg_insert(InstrumentRow).excluded.valid_to,
                     "notes": pg_insert(InstrumentRow).excluded.notes,
-                    "active": True,
+                    "active": pg_insert(InstrumentRow).excluded.active,
                 },
             )
         )
@@ -109,16 +116,19 @@ def upsert_prices(
     session: Session,
     rows: list[dict],
     ingested_at: Optional[datetime] = None,
-) -> tuple[int, int]:
-    """Batch-upsert price rows; return ``(rows_new, rows_revised)``.
+) -> UpsertResult:
+    """Batch-upsert price rows; return ``UpsertResult(rows_new, rows_revised, max_abs, max_rel)``.
 
     A row is only updated when *value* or *known_at* IS DISTINCT FROM the stored
-    value (NULL-safe comparison), so a repeated identical load returns (0, 0) and
-    the original *ingested_at* is preserved.
+    value (NULL-safe comparison), so a repeated identical load returns (0, 0, None, None)
+    and the original *ingested_at* is preserved.
 
     New inserts are identified by PostgreSQL's ``xmax = 0`` system column trick:
     after ON CONFLICT DO UPDATE, ``xmax = 0`` for genuinely new rows and non-zero
     for rows that were updated (value or known_at changed).
+
+    ``max_abs_revision`` and ``max_rel_revision`` are the largest absolute and
+    relative value changes among revised rows; both are None when rows_revised == 0.
 
     Large batches are split into chunks of at most _PRICE_CHUNK rows to stay
     under Postgres's 65,535 bind-parameter limit.
@@ -127,13 +137,32 @@ def upsert_prices(
     (Decimal or float), known_at (date), and optionally run_id.
     """
     if not rows:
-        return (0, 0)
+        return UpsertResult(0, 0, None, None)
     ts = ingested_at or datetime.now(timezone.utc)
     total_new = 0
     total_revised = 0
+
+    # Pre-load existing values so we can compute revision magnitude after the upsert.
+    inst_provider_pairs = {(r["instrument_id"], r["provider"]) for r in rows}
+    old_values: dict[tuple, float] = {}
+    for inst_id, prov in inst_provider_pairs:
+        batch_dates = [
+            r["obs_date"] for r in rows if r["instrument_id"] == inst_id and r["provider"] == prov
+        ]
+        for ex in session.execute(
+            select(PriceRow.obs_date, PriceRow.value).where(
+                PriceRow.instrument_id == inst_id,
+                PriceRow.provider == prov,
+                PriceRow.obs_date.in_(batch_dates),
+            )
+        ).fetchall():
+            old_values[(inst_id, prov, ex.obs_date)] = float(ex.value)
+
     # xmax = 0 marks rows inserted by this statement; xid compares to an integer
     # directly (it cannot be cast to BIGINT).
     is_new_col = literal_column("(prices.xmax = 0)").label("is_new")
+    revised_keys: set[tuple] = set()
+
     for chunk in _chunks(rows, _PRICE_CHUNK):
         payload = [{**r, "ingested_at": ts} for r in chunk]
         ins = pg_insert(PriceRow.__table__).values(payload)
@@ -149,14 +178,35 @@ def upsert_prices(
                 PriceRow.__table__.c.value.is_distinct_from(ins.excluded.value),
                 PriceRow.__table__.c.known_at.is_distinct_from(ins.excluded.known_at),
             ),
-        ).returning(PriceRow.__table__.c.id, is_new_col)
-        result = session.execute(stmt)
-        for row in result.fetchall():
-            if row.is_new:
+        ).returning(
+            PriceRow.__table__.c.instrument_id,
+            PriceRow.__table__.c.provider,
+            PriceRow.__table__.c.obs_date,
+            is_new_col,
+        )
+        for returned in session.execute(stmt).fetchall():
+            if returned.is_new:
                 total_new += 1
             else:
                 total_revised += 1
-    return (total_new, total_revised)
+                revised_keys.add((returned.instrument_id, returned.provider, returned.obs_date))
+
+    # Compute revision magnitude for actually-revised rows.
+    abs_changes: list[float] = []
+    rel_changes: list[float] = []
+    for r in rows:
+        key = (r["instrument_id"], r["provider"], r["obs_date"])
+        if key in revised_keys:
+            old_v = old_values.get(key)
+            if old_v is not None:
+                diff = abs(float(r["value"]) - old_v)
+                abs_changes.append(diff)
+                if old_v != 0:
+                    rel_changes.append(diff / abs(old_v))
+
+    max_abs = max(abs_changes) if abs_changes else None
+    max_rel = max(rel_changes) if rel_changes else None
+    return UpsertResult(total_new, total_revised, max_abs, max_rel)
 
 
 def upsert_labels(session: Session, rows: list[dict]) -> int:
@@ -327,6 +377,32 @@ def get_flag_counts_by_rule(session: Session) -> list:
     ).fetchall()
 
 
+def get_flag_counts_per_instrument(session: Session) -> list:
+    """Return per-(instrument_id, rule) flag counts."""
+    return session.execute(
+        select(
+            DataQualityFlagRow.instrument_id,
+            DataQualityFlagRow.rule,
+            func.count().label("count"),
+        )
+        .group_by(DataQualityFlagRow.instrument_id, DataQualityFlagRow.rule)
+        .order_by(DataQualityFlagRow.instrument_id, DataQualityFlagRow.rule)
+    ).fetchall()
+
+
+def get_last_run_items(session: Session, run_id: int) -> list:
+    """Return all IngestionRunItemRow entries for the given run_id."""
+    return (
+        session.execute(
+            select(IngestionRunItemRow)
+            .where(IngestionRunItemRow.run_id == run_id)
+            .order_by(IngestionRunItemRow.instrument_id, IngestionRunItemRow.provider)
+        )
+        .scalars()
+        .all()
+    )
+
+
 def get_instrument_last_dates(session: Session) -> list:
     """Return max obs_date and native_frequency per active instrument."""
     return session.execute(
@@ -339,6 +415,39 @@ def get_instrument_last_dates(session: Session) -> list:
         .where(InstrumentRow.active.is_(True))
         .group_by(InstrumentRow.id, InstrumentRow.native_frequency)
         .order_by(InstrumentRow.id)
+    ).fetchall()
+
+
+def get_source_last_dates(session: Session) -> list:
+    """Return max obs_date per active (instrument, provider), with source metadata.
+
+    Each row has: id, native_frequency, provider, source_frequency,
+    publication_lag_days, last_obs_date.
+    """
+    return session.execute(
+        select(
+            InstrumentRow.id,
+            InstrumentRow.native_frequency,
+            SymbolMapRow.provider,
+            SymbolMapRow.source_frequency,
+            SymbolMapRow.publication_lag_days,
+            func.max(PriceRow.obs_date).label("last_obs_date"),
+        )
+        .join(SymbolMapRow, SymbolMapRow.instrument_id == InstrumentRow.id)
+        .outerjoin(
+            PriceRow,
+            (PriceRow.instrument_id == InstrumentRow.id)
+            & (PriceRow.provider == SymbolMapRow.provider),
+        )
+        .where(InstrumentRow.active.is_(True))
+        .group_by(
+            InstrumentRow.id,
+            InstrumentRow.native_frequency,
+            SymbolMapRow.provider,
+            SymbolMapRow.source_frequency,
+            SymbolMapRow.publication_lag_days,
+        )
+        .order_by(InstrumentRow.id, SymbolMapRow.provider)
     ).fetchall()
 
 
