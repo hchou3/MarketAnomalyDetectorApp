@@ -65,7 +65,7 @@ def _cmd_sync_registry(args: argparse.Namespace) -> int:
     from sqlalchemy.orm import Session
 
     from .db.engine import create_engine
-    from .db.repository import sync_registry
+    from .db.repository import SymbolChangeError, sync_registry
     from .registry import load_registry
 
     try:
@@ -78,7 +78,18 @@ def _cmd_sync_registry(args: argparse.Namespace) -> int:
         engine = create_engine(url=args.database_url)
         with Session(engine) as session:
             _require_db_ready(engine)
-            sync_registry(session, instruments)
+            try:
+                changes = sync_registry(
+                    session, instruments, allow_symbol_change=args.allow_symbol_change
+                )
+            except SymbolChangeError as exc:
+                print(f"ERROR: {exc}", file=sys.stderr)
+                print(
+                    "Re-run mad-data sync-registry --allow-symbol-change to purge "
+                    "stale rows and proceed.",
+                    file=sys.stderr,
+                )
+                return 1
             session.commit()
     except Exception as exc:
         print(f"ERROR: database error: {exc}", file=sys.stderr)
@@ -86,6 +97,12 @@ def _cmd_sync_registry(args: argparse.Namespace) -> int:
 
     n_sources = sum(len(i.sources) for i in instruments)
     print(f"sync-registry: {len(instruments)} instruments, {n_sources} sources synced.")
+    for chg in changes:
+        print(
+            f"  symbol change: {chg.instrument_id}/{chg.provider}"
+            f" {chg.old_symbol!r} → {chg.new_symbol!r}"
+            f" (deleted {chg.prices_deleted} price rows, {chg.flags_deleted} flag rows)"
+        )
     return 0
 
 
@@ -635,6 +652,16 @@ def main() -> None:
         help="Sync instruments and symbol_map from config/instruments.yaml.",
     )
     p.add_argument("--database-url", default=None, metavar="URL")
+    p.add_argument(
+        "--allow-symbol-change",
+        action="store_true",
+        default=False,
+        help=(
+            "Permit a symbol change on an existing (instrument_id, provider) pair. "
+            "Atomically deletes that pair's prices and data_quality_flags rows "
+            "before updating symbol_map; the next backfill refetches clean history."
+        ),
+    )
 
     # ── load-ews ─────────────────────────────────────────────────────────────
     p = subparsers.add_parser(

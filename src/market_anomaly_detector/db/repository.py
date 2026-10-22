@@ -38,20 +38,129 @@ class UpsertResult(NamedTuple):
     max_rel_revision: Optional[float]
 
 
+class SymbolChangeError(Exception):
+    """Raised when sync_registry detects a symbol change without allow_symbol_change=True."""
+
+    def __init__(self, changes: list[tuple[str, str, str, str]]) -> None:
+        # changes: [(instrument_id, provider, old_symbol, new_symbol), ...]
+        self.changes = changes
+        msgs = [f"  {inst}/{prov}: {old!r} → {new!r}" for inst, prov, old, new in changes]
+        super().__init__(
+            "Symbol changes detected — re-run with --allow-symbol-change to purge stale "
+            "rows and proceed:\n" + "\n".join(msgs)
+        )
+
+
+class SymbolChangeRecord:
+    """Record of one purged (instrument_id, provider) pair during a symbol switch."""
+
+    __slots__ = (
+        "instrument_id",
+        "provider",
+        "old_symbol",
+        "new_symbol",
+        "prices_deleted",
+        "flags_deleted",
+    )
+
+    def __init__(
+        self,
+        instrument_id: str,
+        provider: str,
+        old_symbol: str,
+        new_symbol: str,
+        prices_deleted: int,
+        flags_deleted: int,
+    ) -> None:
+        self.instrument_id = instrument_id
+        self.provider = provider
+        self.old_symbol = old_symbol
+        self.new_symbol = new_symbol
+        self.prices_deleted = prices_deleted
+        self.flags_deleted = flags_deleted
+
+    def __repr__(self) -> str:
+        return (
+            f"SymbolChangeRecord({self.instrument_id}/{self.provider}: "
+            f"{self.old_symbol!r}→{self.new_symbol!r}, "
+            f"prices_deleted={self.prices_deleted}, flags_deleted={self.flags_deleted})"
+        )
+
+
 def _chunks(lst: list, size: int):
     for i in range(0, len(lst), size):
         yield lst[i : i + size]
 
 
-def sync_registry(session: Session, instruments: list[Instrument]) -> None:
+def sync_registry(
+    session: Session,
+    instruments: list[Instrument],
+    allow_symbol_change: bool = False,
+) -> list[SymbolChangeRecord]:
     """Upsert instruments, groups, and symbol_map rows from the YAML registry.
 
     Instruments present in the DB but absent from *instruments* are marked
     active=False; their prices are preserved.  Groups and symbol_map rows are
     replaced wholesale on each sync (no price data depends on them directly).
+
+    Symbol-change detection
+    -----------------------
+    When the YAML symbol for an ``(instrument_id, provider)`` pair differs from
+    the value already in ``symbol_map``, the function raises ``SymbolChangeError``
+    (listing all affected pairs) unless ``allow_symbol_change=True``.  With the
+    flag, the stale prices and data_quality_flags rows for each changed pair are
+    deleted atomically before the symbol_map update, and a ``SymbolChangeRecord``
+    is returned for each pair.  The next backfill then refetches clean history.
     """
     yaml_ids = {inst.id for inst in instruments}
 
+    # ── Symbol-change detection ───────────────────────────────────────────────
+    # Collect (instrument_id, provider) pairs where the YAML symbol differs from
+    # the value already stored in symbol_map.
+    conflicts: list[tuple[str, str, str, str]] = []
+    for inst in instruments:
+        for src in inst.sources:
+            if src.symbol is None:
+                continue
+            existing_sym = session.execute(
+                select(SymbolMapRow.symbol).where(
+                    SymbolMapRow.instrument_id == inst.id,
+                    SymbolMapRow.provider == src.provider,
+                )
+            ).scalar_one_or_none()
+            if existing_sym is not None and existing_sym != src.symbol:
+                conflicts.append((inst.id, src.provider, existing_sym, src.symbol))
+
+    if conflicts and not allow_symbol_change:
+        raise SymbolChangeError(conflicts)
+
+    # Purge stale data for every changed pair before the symbol_map update.
+    changes: list[SymbolChangeRecord] = []
+    for inst_id, provider, old_symbol, new_symbol in conflicts:
+        n_prices = session.execute(
+            delete(PriceRow).where(
+                PriceRow.instrument_id == inst_id,
+                PriceRow.provider == provider,
+            )
+        ).rowcount
+        n_flags = session.execute(
+            delete(DataQualityFlagRow).where(
+                DataQualityFlagRow.instrument_id == inst_id,
+                DataQualityFlagRow.provider == provider,
+            )
+        ).rowcount
+        changes.append(
+            SymbolChangeRecord(
+                instrument_id=inst_id,
+                provider=provider,
+                old_symbol=old_symbol,
+                new_symbol=new_symbol,
+                prices_deleted=n_prices,
+                flags_deleted=n_flags,
+            )
+        )
+
+    # ── Instruments ───────────────────────────────────────────────────────────
     existing = session.execute(select(InstrumentRow)).scalars().all()
     for row in existing:
         if row.id not in yaml_ids:
@@ -110,6 +219,8 @@ def sync_registry(session: Session, instruments: list[Instrument]) -> None:
                     notes=src.notes,
                 )
             )
+
+    return changes
 
 
 def upsert_prices(

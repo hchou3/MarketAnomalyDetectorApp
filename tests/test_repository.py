@@ -16,6 +16,7 @@ from market_anomaly_detector.db.models import (
     SymbolMapRow,
 )
 from market_anomaly_detector.db.repository import (
+    SymbolChangeError,
     add_run_item,
     finish_run,
     get_flag_counts_by_rule,
@@ -30,7 +31,15 @@ from market_anomaly_detector.db.repository import (
     upsert_prices,
     write_quality_flags,
 )
-from market_anomaly_detector.registry import load_registry
+from market_anomaly_detector.registry import (
+    AssetClass,
+    Fidelity,
+    Frequency,
+    Instrument,
+    SourceEntry,
+    Units,
+    load_registry,
+)
 
 # ── known_at (pure, no DB) ────────────────────────────────────────────────────
 
@@ -182,6 +191,253 @@ def test_sync_registry_deactivates_removed_instrument(db_session):
     gold = db_session.get(InstrumentRow, "gold")
     assert gold is not None, "Row should be kept (not deleted)"
     assert gold.active is False
+
+
+# ── Symbol-change guard ───────────────────────────────────────────────────────
+
+
+def _minimal_instrument(inst_id: str, provider: str, symbol: str) -> Instrument:
+    """Build the smallest valid Instrument for symbol-change tests."""
+    return Instrument(
+        id=inst_id,
+        name=f"Test {inst_id}",
+        asset_class=AssetClass.equity_index,
+        groups=["equity_index"],
+        units=Units.index_points,
+        quote="points",
+        native_frequency=Frequency.daily,
+        sources=[
+            SourceEntry(
+                provider=provider,
+                symbol=symbol,
+                priority=1,
+                fidelity=Fidelity.proxy,
+            )
+        ],
+    )
+
+
+@pytest.mark.db
+def test_sync_registry_rejects_symbol_change_without_flag(db_session):
+    """sync_registry must raise SymbolChangeError when a symbol changes and flag is False."""
+    inst_id = "sym_guard_test"
+    db_session.add(
+        InstrumentRow(
+            id=inst_id,
+            name="sym guard",
+            asset_class="equity_index",
+            units="index_points",
+            quote="pts",
+            native_frequency="daily",
+            notes="",
+            active=True,
+        )
+    )
+    db_session.add(
+        SymbolMapRow(
+            instrument_id=inst_id, provider="yahoo", symbol="EWJ", priority=1, fidelity="proxy"
+        )
+    )
+    db_session.flush()
+
+    with pytest.raises(SymbolChangeError) as exc_info:
+        sync_registry(db_session, [_minimal_instrument(inst_id, "yahoo", "^N225")])
+
+    err = str(exc_info.value)
+    assert inst_id in err
+    assert "EWJ" in err
+    assert "^N225" in err
+
+
+@pytest.mark.db
+def test_sync_registry_symbol_change_purges_prices_and_flags(db_session):
+    """With allow_symbol_change=True, prices and quality flags are deleted atomically."""
+    from sqlalchemy import func, select
+
+    inst_id = "sym_purge_test"
+    db_session.add(
+        InstrumentRow(
+            id=inst_id,
+            name="sym purge",
+            asset_class="equity_index",
+            units="index_points",
+            quote="pts",
+            native_frequency="daily",
+            notes="",
+            active=True,
+        )
+    )
+    db_session.add(
+        SymbolMapRow(
+            instrument_id=inst_id, provider="yahoo", symbol="EWJ", priority=1, fidelity="proxy"
+        )
+    )
+    db_session.flush()
+
+    # Seed EWJ rows — include 2024-01-08 (Coming of Age Day: TSE closed, NYSE open)
+    ewj_dates = [date(2024, 1, 2), date(2024, 1, 3), date(2024, 1, 8), date(2024, 1, 9)]
+    upsert_prices(
+        db_session,
+        [
+            dict(
+                instrument_id=inst_id,
+                provider="yahoo",
+                obs_date=d,
+                value=Decimal("52.00"),
+                known_at=d,
+                run_id=None,
+            )
+            for d in ewj_dates
+        ],
+    )
+    db_session.add(
+        DataQualityFlagRow(
+            instrument_id=inst_id,
+            provider="yahoo",
+            obs_date=date(2024, 1, 8),
+            rule="holiday_check",
+            detail="EWJ traded on TSE holiday",
+        )
+    )
+    db_session.flush()
+
+    changes = sync_registry(
+        db_session,
+        [_minimal_instrument(inst_id, "yahoo", "^N225")],
+        allow_symbol_change=True,
+    )
+    db_session.flush()
+
+    assert len(changes) == 1
+    chg = changes[0]
+    assert chg.instrument_id == inst_id
+    assert chg.provider == "yahoo"
+    assert chg.old_symbol == "EWJ"
+    assert chg.new_symbol == "^N225"
+    assert chg.prices_deleted == len(ewj_dates)
+    assert chg.flags_deleted == 1
+
+    remaining_prices = db_session.execute(
+        select(func.count())
+        .select_from(PriceRow)
+        .where(
+            PriceRow.instrument_id == inst_id,
+            PriceRow.provider == "yahoo",
+        )
+    ).scalar_one()
+    assert remaining_prices == 0
+
+    sm = db_session.execute(
+        select(SymbolMapRow).where(
+            SymbolMapRow.instrument_id == inst_id,
+            SymbolMapRow.provider == "yahoo",
+        )
+    ).scalar_one()
+    assert sm.symbol == "^N225"
+
+
+@pytest.mark.db
+def test_symbol_change_backfill_no_large_returns(db_session):
+    """After EWJ→^N225 purge + fixture backfill, no consecutive log-return exceeds 0.5.
+
+    Verifies that no EWJ values survive to corrupt the ^N225 series.  EWJ (~52 USD) and
+    ^N225 (~35000 JPY) are on incompatible scales; a mixed row pair would produce a
+    log-return of |log(35000/52)| ≈ 6.5, far above the 0.5 sentinel.
+    """
+    import math
+    from decimal import Decimal as D
+    from typing import Optional
+
+    import pandas as pd
+    from sqlalchemy import select
+
+    from market_anomaly_detector.ingestion import PostgresPriceSink, run_backfill
+
+    inst_id = "sym_backfill_test"
+    db_session.add(
+        InstrumentRow(
+            id=inst_id,
+            name="sym backfill",
+            asset_class="equity_index",
+            units="index_points",
+            quote="pts",
+            native_frequency="daily",
+            notes="",
+            active=True,
+        )
+    )
+    db_session.add(
+        SymbolMapRow(
+            instrument_id=inst_id, provider="yahoo", symbol="EWJ", priority=1, fidelity="proxy"
+        )
+    )
+    db_session.flush()
+
+    # Seed EWJ rows including a Tokyo holiday (2024-01-08)
+    ewj_dates = [date(2024, 1, 2), date(2024, 1, 3), date(2024, 1, 8), date(2024, 1, 9)]
+    upsert_prices(
+        db_session,
+        [
+            dict(
+                instrument_id=inst_id,
+                provider="yahoo",
+                obs_date=d,
+                value=D("52.00"),
+                known_at=d,
+                run_id=None,
+            )
+            for d in ewj_dates
+        ],
+    )
+    db_session.flush()
+
+    # Purge EWJ and update symbol to ^N225
+    sync_registry(
+        db_session,
+        [_minimal_instrument(inst_id, "yahoo", "^N225")],
+        allow_symbol_change=True,
+    )
+    db_session.flush()
+
+    # Backfill ^N225 from fixture (realistic ~35000 JPY values; no 2024-01-08 = holiday)
+    n225_fixture = pd.DataFrame(
+        {
+            "obs_date": [date(2024, 1, 2), date(2024, 1, 3), date(2024, 1, 9), date(2024, 1, 10)],
+            "value": [33288.29, 33377.42, 33763.18, 33763.18],
+        }
+    )
+
+    class _FakeProvider:
+        name = "yahoo"
+
+        def get_history(
+            self, symbol: str, start: Optional[date] = None, end: Optional[date] = None
+        ):
+            df = n225_fixture.copy()
+            if start is not None:
+                df = df[df["obs_date"] >= start]
+            return df.reset_index(drop=True)
+
+    inst_obj = _minimal_instrument(inst_id, "yahoo", "^N225")
+    sink = PostgresPriceSink(db_session)
+    run_backfill([inst_obj], providers={"yahoo": _FakeProvider()}, sink=sink, session=db_session)
+    db_session.flush()
+
+    # Fetch all prices for this instrument, sorted by date
+    prices = db_session.execute(
+        select(PriceRow.obs_date, PriceRow.value)
+        .where(PriceRow.instrument_id == inst_id, PriceRow.provider == "yahoo")
+        .order_by(PriceRow.obs_date)
+    ).all()
+
+    assert len(prices) == len(n225_fixture), "Expected only ^N225 rows, no EWJ survivors"
+
+    # No consecutive log-return may exceed 0.5 (mixed EWJ/N225 would be ~6.5)
+    for (d1, v1), (d2, v2) in zip(prices, prices[1:]):
+        log_ret = abs(math.log(float(v2) / float(v1)))
+        assert log_ret < 0.5, (
+            f"Large return between {d1} ({v1}) and {d2} ({v2}): log_ret={log_ret:.3f}"
+        )
 
 
 # ── upsert_prices ─────────────────────────────────────────────────────────────
