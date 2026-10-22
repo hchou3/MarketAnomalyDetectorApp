@@ -27,6 +27,30 @@ class FeatureSpec:
     transform: str
     window: int
     instrument_id_2: str = field(default="")
+    # Optional list of proxy instrument IDs to extend this instrument's history.
+    # load_prices splices them in ascending date order before the primary's first row,
+    # using only entries rated "proxy" or "exact" in the coverage report.
+    fallback_instrument_ids: list[str] = field(default_factory=list)
+
+
+def validate_spec_fallbacks(spec: list[FeatureSpec], instruments: list) -> None:
+    """Raise ValueError if any fallback_instrument_id doesn't exist in instruments.
+
+    Parameters
+    ----------
+    spec:
+        Feature specification list to validate.
+    instruments:
+        Registry instrument list (each must have an ``.id`` attribute).
+    """
+    inst_ids = {inst.id for inst in instruments}
+    for feat in spec:
+        for fb_id in feat.fallback_instrument_ids:
+            if fb_id not in inst_ids:
+                raise ValueError(
+                    f"FeatureSpec {feat.col!r}: fallback_instrument_id {fb_id!r} "
+                    f"not found in instrument registry"
+                )
 
 
 # ── Feature set v1 ────────────────────────────────────────────────────────────

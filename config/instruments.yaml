@@ -84,6 +84,33 @@
   valid_to: null
   notes: CRY (Reuters/Jefferies CRB) is the official index; DBC is the best public proxy.
 
+- id: crb_commodity_bcom
+  name: CRB Commodity proxy — Bloomberg Commodity Index (^BCOM)
+  reference_instrument: crb_commodity
+  asset_class: macro_index
+  groups: [commodity]
+  units: index_points
+  quote: Index level; higher = stronger commodity prices
+  native_frequency: daily
+  sources:
+    - provider: yahoo
+      symbol: "^BCOM"
+      priority: 1
+      fidelity: proxy
+      auto_adjust: false
+      source_frequency: daily
+      publication_lag_days: 0
+      notes: >
+        Bloomberg Commodity Index (launched as DJ-AIG Commodity Index in 1998,
+        back-calculated to ~1991 on Yahoo). Different basket from CRY but longest
+        public commodity index with pre-2006 coverage. No distributions; auto_adjust
+        not needed.
+  valid_from: null
+  valid_to: null
+  notes: >
+    Proxy for crb_commodity. Use as fallback_instrument_id in FeatureSpec to extend
+    coverage before DBC's 2006 start.
+
 - id: baltic_dry
   name: Baltic Dry Index
   asset_class: macro_index
@@ -651,6 +678,30 @@
   valid_to: null
   notes: ""
 
+- id: us_hy_corp_tr_vwehx
+  name: US HY Corporate Bond proxy — Vanguard High-Yield Corporate Bond Fund (VWEHX)
+  reference_instrument: us_hy_corp_tr
+  asset_class: credit
+  groups: [stress_indicator, credit]
+  units: index_points
+  quote: Total return index level
+  native_frequency: daily
+  sources:
+    - provider: yahoo
+      symbol: VWEHX
+      priority: 1
+      fidelity: proxy
+      auto_adjust: true
+      source_frequency: daily
+      publication_lag_days: 0
+      notes: >
+        Vanguard High-Yield Corporate Bond mutual fund (NAV); history from ~1978.
+        Extends coverage before HYG's 2007 start. NAV series; dividend-adjusted via
+        auto_adjust.
+  valid_from: null
+  valid_to: null
+  notes: Proxy for us_hy_corp_tr. Use as fallback_instrument_id in FeatureSpec.
+
 - id: global_hy_tr
   name: Bloomberg Global High-Yield Total Return Index (candidate)
   asset_class: credit
@@ -772,6 +823,51 @@
   valid_to: null
   notes: ""
 
+- id: msci_europe_iev
+  name: MSCI Europe proxy — iShares Europe ETF (IEV)
+  reference_instrument: msci_europe
+  asset_class: equity_index
+  groups: [equity_index]
+  units: index_points
+  quote: Index level in USD
+  native_frequency: daily
+  sources:
+    - provider: yahoo
+      symbol: IEV
+      priority: 1
+      fidelity: proxy
+      auto_adjust: true
+      source_frequency: daily
+      publication_lag_days: 0
+      notes: iShares Europe ETF; available from ~2000-07-25. Extends coverage before VGK's 2005 start.
+  valid_from: null
+  valid_to: null
+  notes: Proxy for msci_europe. Use as fallback_instrument_id in FeatureSpec.
+
+- id: msci_europe_stoxx50
+  name: MSCI Europe proxy — Euro Stoxx 50 Index (^STOXX50E)
+  reference_instrument: msci_europe
+  asset_class: equity_index
+  groups: [equity_index]
+  units: index_points
+  quote: Index level in EUR (narrow large-cap)
+  native_frequency: daily
+  sources:
+    - provider: yahoo
+      symbol: "^STOXX50E"
+      priority: 1
+      fidelity: proxy
+      auto_adjust: false
+      source_frequency: daily
+      publication_lag_days: 0
+      notes: >
+        Euro Stoxx 50 index (EUR-denominated, large-cap eurozone only); back-calculated
+        to 1986. Currency mismatch vs MSCI Europe (USD) and narrower universe; usable
+        proxy pre-2000.
+  valid_from: null
+  valid_to: null
+  notes: Proxy for msci_europe. Use as fallback_instrument_id in FeatureSpec.
+
 - id: msci_japan
   name: MSCI Japan Index
   asset_class: equity_index
@@ -854,6 +950,50 @@
   valid_to: null
   notes: ""
 
+- id: msci_india_epi
+  name: MSCI India proxy — WisdomTree India Earnings ETF (EPI)
+  reference_instrument: msci_india
+  asset_class: equity_index
+  groups: [equity_index]
+  units: index_points
+  quote: Index level in USD
+  native_frequency: daily
+  sources:
+    - provider: yahoo
+      symbol: EPI
+      priority: 1
+      fidelity: proxy
+      auto_adjust: true
+      source_frequency: daily
+      publication_lag_days: 0
+      notes: WisdomTree India Earnings ETF; available from 2008-02-22. Extends coverage before INDA's 2012 start.
+  valid_from: null
+  valid_to: null
+  notes: Proxy for msci_india. Use as fallback_instrument_id in FeatureSpec.
+
+- id: msci_india_bsesn
+  name: MSCI India proxy — BSE Sensex (^BSESN)
+  reference_instrument: msci_india
+  asset_class: equity_index
+  groups: [equity_index]
+  units: index_points
+  quote: Index level in INR (30 large-cap stocks)
+  native_frequency: daily
+  sources:
+    - provider: yahoo
+      symbol: "^BSESN"
+      priority: 1
+      fidelity: proxy
+      auto_adjust: false
+      source_frequency: daily
+      publication_lag_days: 0
+      notes: >
+        Bombay Stock Exchange SENSEX (INR-denominated, 30 large-cap stocks); history
+        from ~1979. Currency mismatch vs MSCI India (USD); usable proxy pre-2008.
+  valid_from: null
+  valid_to: null
+  notes: Proxy for msci_india. Use as fallback_instrument_id in FeatureSpec.
+
 - id: msci_china
   name: MSCI China Index
   asset_class: equity_index
@@ -875,6 +1015,51 @@
   valid_from: null
   valid_to: null
   notes: ""
+
+- id: msci_china_fxi
+  name: MSCI China proxy — iShares China Large-Cap ETF (FXI)
+  reference_instrument: msci_china
+  asset_class: equity_index
+  groups: [equity_index]
+  units: index_points
+  quote: Index level in USD
+  native_frequency: daily
+  sources:
+    - provider: yahoo
+      symbol: FXI
+      priority: 1
+      fidelity: proxy
+      auto_adjust: true
+      source_frequency: daily
+      publication_lag_days: 0
+      notes: iShares China Large-Cap ETF; available from 2004-10-05. Extends coverage before MCHI's 2011 start.
+  valid_from: null
+  valid_to: null
+  notes: Proxy for msci_china. Use as fallback_instrument_id in FeatureSpec.
+
+- id: msci_china_sse
+  name: MSCI China proxy — Shanghai Composite Index (000001.SS)
+  reference_instrument: msci_china
+  asset_class: equity_index
+  groups: [equity_index]
+  units: index_points
+  quote: Index level in CNY (A-shares)
+  native_frequency: daily
+  sources:
+    - provider: yahoo
+      symbol: "000001.SS"
+      priority: 1
+      fidelity: proxy
+      auto_adjust: false
+      source_frequency: daily
+      publication_lag_days: 0
+      notes: >
+        Shanghai Stock Exchange Composite Index (CNY-denominated); history from 1990.
+        Currency mismatch vs MSCI China (USD) and broader A-share universe; usable
+        proxy pre-2004.
+  valid_from: null
+  valid_to: null
+  notes: Proxy for msci_china. Use as fallback_instrument_id in FeatureSpec.
 
 # ── Macro index ────────────────────────────────────────────────────────────────
 

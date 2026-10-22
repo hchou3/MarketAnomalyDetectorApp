@@ -385,7 +385,10 @@ def _build_row(
         stale = True
 
     # ── bloomberg_ews comparison ──────────────────────────────────────────────
-    ews_df = prices.get((inst.id, "bloomberg_ews"))
+    # For proxy instruments with reference_instrument, compare against the
+    # reference's EWS series (the proxy has no bloomberg_ews source of its own).
+    ews_inst_id = inst.reference_instrument if inst.reference_instrument else inst.id
+    ews_df = prices.get((ews_inst_id, "bloomberg_ews"))
     comparison: Optional[FidelityComparison] = None
 
     if chosen_src is not None and chosen_df is not None and ews_df is not None and not ews_df.empty:

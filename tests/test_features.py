@@ -722,3 +722,356 @@ def test_weekly_series_gap_returns_nan():
     tues_idx = pd.DatetimeIndex([pd.Timestamp(gap_tuesday)])
     s = _weekly_series(df, tues_idx)
     assert math.isnan(s.iloc[0])
+
+
+# ── Provider splicing ─────────────────────────────────────────────────────────
+
+
+from market_anomaly_detector.features.build import _splice_providers, load_prices  # noqa: E402
+
+
+def _provider_df(start: date, n_days: int, val_start: float = 100.0) -> pd.DataFrame:
+    """Daily DataFrame with n_days consecutive calendar days starting on start."""
+    obs = [start + timedelta(days=i) for i in range(n_days)]
+    return pd.DataFrame(
+        {
+            "obs_date": obs,
+            "value": [val_start + i * 0.01 for i in range(n_days)],
+            "known_at": obs,
+        }
+    )
+
+
+def test_splice_providers_returns_none_for_empty():
+    assert _splice_providers([]) is None
+
+
+def test_splice_providers_single_provider_adds_source_column():
+    df = _provider_df(date(2020, 1, 1), 30)
+    result = _splice_providers([("yahoo", "proxy", df)])
+    assert result is not None
+    assert "source_provider" in result.columns
+    assert (result["source_provider"] == "yahoo").all()
+    assert len(result) == 30
+
+
+def test_splice_providers_extends_backward_no_overlap():
+    """Secondary rows strictly before primary start are prepended; overlap excluded."""
+    primary = _provider_df(date(2020, 1, 10), 11)  # days 10–20
+    secondary = _provider_df(date(2020, 1, 1), 15)  # days 1–15 (overlap 10–15)
+    result = _splice_providers([("yahoo", "exact", primary), ("fred", "proxy", secondary)])
+    assert result is not None
+    # Secondary contributes days 1–9 (9 rows), primary keeps days 10–20 (11 rows)
+    assert len(result) == 9 + 11
+    sec = result[result["source_provider"] == "fred"]
+    pri = result[result["source_provider"] == "yahoo"]
+    assert len(sec) == 9
+    assert len(pri) == 11
+    assert sec["obs_date"].max() < pri["obs_date"].min()
+
+
+def test_splice_providers_skips_low_fidelity_secondary():
+    """Secondary with fidelity not in {proxy, exact} is never used."""
+    primary = _provider_df(date(2020, 1, 10), 11)
+    secondary = _provider_df(date(2020, 1, 1), 15)
+    result = _splice_providers([("yahoo", "exact", primary), ("fred", "unavailable", secondary)])
+    assert result is not None
+    assert (result["source_provider"] == "yahoo").all()
+    assert len(result) == 11
+
+
+def test_splice_providers_chain_two_secondaries():
+    """Second secondary extends before the first secondary (chain splice)."""
+    primary = _provider_df(date(2020, 6, 1), 30)  # starts Jun 1
+    sec1 = _provider_df(date(2020, 3, 1), 100)  # starts Mar 1
+    sec2 = _provider_df(date(2020, 1, 1), 200)  # starts Jan 1
+    result = _splice_providers(
+        [("yahoo", "exact", primary), ("fred", "proxy", sec1), ("cboe", "proxy", sec2)]
+    )
+    assert result is not None
+    min_by_prov = result.groupby("source_provider")["obs_date"].min()
+    # cboe earliest, fred middle, yahoo latest
+    assert min_by_prov["cboe"] < min_by_prov["fred"] < min_by_prov["yahoo"]
+
+
+def test_splice_providers_noop_when_secondary_does_not_pre_date_primary():
+    """Secondary starting after primary is not spliced; primary unchanged."""
+    primary = _provider_df(date(2020, 1, 1), 30)
+    secondary = _provider_df(date(2020, 1, 15), 30)  # starts after primary
+    result = _splice_providers([("yahoo", "exact", primary), ("fred", "proxy", secondary)])
+    assert result is not None
+    assert (result["source_provider"] == "yahoo").all()
+    assert len(result) == 30
+
+
+def test_splice_providers_sorted_by_obs_date():
+    """Result rows are in ascending obs_date order after splice."""
+    primary = _provider_df(date(2020, 6, 1), 10)
+    secondary = _provider_df(date(2020, 1, 1), 50)
+    result = _splice_providers([("yahoo", "proxy", primary), ("fred", "proxy", secondary)])
+    assert result is not None
+    dates = result["obs_date"].tolist()
+    assert dates == sorted(dates)
+
+
+# ── FeatureSpec.fallback_instrument_ids ───────────────────────────────────────
+
+
+def test_featurespec_fallback_instrument_ids_defaults_to_empty():
+    """FeatureSpec.fallback_instrument_ids defaults to an empty list."""
+    feat = FeatureSpec("x_lr_1w", "X 1w", "x", "price", "log_return", 1)
+    assert feat.fallback_instrument_ids == []
+
+
+def test_featurespec_fallback_instrument_ids_accepted():
+    """FeatureSpec can be created with explicit fallback_instrument_ids."""
+    feat = FeatureSpec(
+        "x_lr_1w",
+        "X 1w",
+        "x",
+        "price",
+        "log_return",
+        1,
+        fallback_instrument_ids=["x_proxy1", "x_proxy2"],
+    )
+    assert feat.fallback_instrument_ids == ["x_proxy1", "x_proxy2"]
+
+
+# ── validate_spec_fallbacks ───────────────────────────────────────────────────
+
+
+from market_anomaly_detector.features.spec import validate_spec_fallbacks  # noqa: E402
+
+
+class _FakeInst:
+    def __init__(self, id_: str) -> None:
+        self.id = id_
+
+
+def test_validate_spec_fallbacks_passes_for_known_ids():
+    """validate_spec_fallbacks does not raise when all fallback IDs are in the registry."""
+    instruments = [_FakeInst("main"), _FakeInst("proxy_a")]
+    spec = [
+        FeatureSpec(
+            "main_lr_1w",
+            "Main 1w",
+            "main",
+            "price",
+            "log_return",
+            1,
+            fallback_instrument_ids=["proxy_a"],
+        )
+    ]
+    validate_spec_fallbacks(spec, instruments)  # should not raise
+
+
+def test_validate_spec_fallbacks_raises_for_unknown_id():
+    """validate_spec_fallbacks raises ValueError naming the unknown fallback ID."""
+    instruments = [_FakeInst("main")]
+    spec = [
+        FeatureSpec(
+            "main_lr_1w",
+            "Main 1w",
+            "main",
+            "price",
+            "log_return",
+            1,
+            fallback_instrument_ids=["nonexistent_proxy"],
+        )
+    ]
+    with pytest.raises(ValueError, match="nonexistent_proxy"):
+        validate_spec_fallbacks(spec, instruments)
+
+
+def test_validate_spec_fallbacks_passes_for_empty_fallbacks():
+    """validate_spec_fallbacks passes when no spec entry has fallback_instrument_ids."""
+    instruments = [_FakeInst("main")]
+    spec = [FeatureSpec("main_lr_1w", "Main 1w", "main", "price", "log_return", 1)]
+    validate_spec_fallbacks(spec, instruments)  # should not raise
+
+
+# ── load_prices cross-instrument fallback ────────────────────────────────────
+
+
+class _SRow:
+    """Fake SQLAlchemy SymbolMapRow result for mock sessions."""
+
+    def __init__(self, provider: str, priority: int, fidelity: str) -> None:
+        self.provider = provider
+        self.priority = priority
+        self.fidelity = fidelity
+
+
+class _PRow:
+    """Fake SQLAlchemy PriceRow result for mock sessions; iterable so pandas can unpack it."""
+
+    def __init__(self, obs_date: date, value: float, known_at: date) -> None:
+        self.obs_date = obs_date
+        self.value = value
+        self.known_at = known_at
+
+    def __iter__(self):
+        return iter([self.obs_date, self.value, self.known_at])
+
+    def __len__(self):
+        return 3
+
+
+def _make_mock_session(
+    symbol_rows: dict[str, list[tuple[str, int, str]]],
+    price_rows: dict[tuple[str, str], list[tuple[date, float, date]]],
+) -> object:
+    """Build a mock SQLAlchemy session for load_prices tests.
+
+    Uses a FIFO queue: calls are returned in the order load_prices issues them.
+    For each instrument (sorted), load_prices calls:
+      1. execute(symbol_map_query) → _SRow list
+      2. execute(price_query) × N providers → _PRow list per provider
+
+    symbol_rows: {instrument_id: [(provider, priority, fidelity), ...]}
+    price_rows:  {(instrument_id, provider): [(obs_date, value, known_at), ...]}
+    """
+    from unittest.mock import MagicMock
+
+    # Build call queue in the exact order load_prices issues queries.
+    # load_prices calls _fetch_providers for each primary inst (sorted), then
+    # for each fallback inst as they appear in fallback_map.
+    # We can't predict fallback order here, so instead we intercept by
+    # inspecting the compiled SQL params.
+
+    session = MagicMock()
+
+    def execute(stmt):
+        result = MagicMock()
+        try:
+            compiled = stmt.compile()
+            params = compiled.params
+        except Exception:
+            result.fetchall.return_value = []
+            return result
+
+        # instrument_id bind param name varies; try common names
+        inst_id = (
+            params.get("instrument_id_1")
+            or params.get("instrument_id_1_1")
+            or params.get("instrument_id_1_2")
+        )
+        provider = params.get("provider_1") or params.get("provider_1_1")
+
+        if inst_id is None:
+            result.fetchall.return_value = []
+            return result
+
+        if provider is None or provider == "bloomberg_ews":
+            # Symbol map query (filters provider != "bloomberg_ews")
+            srcs = [s for s in symbol_rows.get(inst_id, []) if s[0] != "bloomberg_ews"]
+            result.fetchall.return_value = [_SRow(*s) for s in srcs]
+        else:
+            # Price query
+            key = (inst_id, provider)
+            rows = price_rows.get(key, [])
+            result.fetchall.return_value = [_PRow(*r) for r in rows]
+
+        return result
+
+    session.execute.side_effect = execute
+    return session
+
+
+def test_load_prices_cross_instrument_splice():
+    """load_prices splices fallback instrument data before primary's first date.
+
+    Primary has data from 2020-01-10; fallback from 2020-01-01 to 2020-01-09
+    (the two rows before primary start) are spliced in.
+    """
+    primary_dates = [date(2020, 1, 10), date(2020, 1, 17), date(2020, 1, 24)]
+    fallback_dates = [date(2020, 1, 1), date(2020, 1, 5), date(2020, 1, 9)]
+
+    symbol_rows = {
+        "main_inst": [("yahoo", 1, "proxy")],
+        "fallback_inst": [("yahoo", 1, "proxy")],
+    }
+    price_rows = {
+        ("main_inst", "yahoo"): [(d, float(100 + i), d) for i, d in enumerate(primary_dates)],
+        ("fallback_inst", "yahoo"): [(d, float(90 + i), d) for i, d in enumerate(fallback_dates)],
+    }
+
+    spec = [
+        FeatureSpec(
+            "x_lr_1w",
+            "X 1w",
+            "main_inst",
+            "price",
+            "log_return",
+            1,
+            fallback_instrument_ids=["fallback_inst"],
+        )
+    ]
+
+    session = _make_mock_session(symbol_rows, price_rows)
+    result = load_prices(session, spec)
+
+    assert "main_inst" in result
+    df = result["main_inst"]
+    # Should have primary rows + fallback rows before primary start
+    assert len(df) == len(primary_dates) + len(fallback_dates)
+    # All fallback rows have earlier dates than any primary row
+    fb_rows = df[df["source_instrument_id"] == "fallback_inst"]
+    pri_rows = df[df["source_instrument_id"] == "main_inst"]
+    assert not fb_rows.empty
+    assert not pri_rows.empty
+    assert fb_rows["obs_date"].max() < pri_rows["obs_date"].min()
+    # source_instrument_id column exists on all rows
+    assert "source_instrument_id" in df.columns
+
+
+def test_load_prices_skips_low_fidelity_fallback():
+    """Fallback instruments rated 'unavailable' are never spliced in."""
+    primary_dates = [date(2020, 1, 10)]
+    fallback_dates = [date(2020, 1, 1)]
+
+    symbol_rows = {
+        "main_inst": [("yahoo", 1, "exact")],
+        "bad_fallback": [("yahoo", 1, "unavailable")],
+    }
+    price_rows = {
+        ("main_inst", "yahoo"): [(d, 100.0, d) for d in primary_dates],
+        ("bad_fallback", "yahoo"): [(d, 80.0, d) for d in fallback_dates],
+    }
+
+    spec = [
+        FeatureSpec(
+            "x_lr_1w",
+            "X 1w",
+            "main_inst",
+            "price",
+            "log_return",
+            1,
+            fallback_instrument_ids=["bad_fallback"],
+        )
+    ]
+
+    session = _make_mock_session(symbol_rows, price_rows)
+    result = load_prices(session, spec)
+
+    assert "main_inst" in result
+    df = result["main_inst"]
+    # Only primary rows; fallback skipped due to unavailable fidelity
+    assert len(df) == len(primary_dates)
+    assert (df["source_instrument_id"] == "main_inst").all()
+
+
+def test_load_prices_source_instrument_id_set_without_fallbacks():
+    """source_instrument_id is always populated, even when no fallbacks are used."""
+    primary_dates = [date(2020, 1, 7), date(2020, 1, 14)]
+    symbol_rows = {"my_inst": [("yahoo", 1, "exact")]}
+    price_rows = {("my_inst", "yahoo"): [(d, 100.0, d) for d in primary_dates]}
+
+    spec = [FeatureSpec("x_lr_1w", "X 1w", "my_inst", "price", "log_return", 1)]
+    session = _make_mock_session(symbol_rows, price_rows)
+    result = load_prices(session, spec)
+
+    assert "my_inst" in result
+    df = result["my_inst"]
+    assert "source_instrument_id" in df.columns
+    assert (df["source_instrument_id"] == "my_inst").all()
