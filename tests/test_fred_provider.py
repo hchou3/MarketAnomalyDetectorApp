@@ -66,6 +66,49 @@ def test_fred_malformed_response_raises():
         provider.get_history("BAD")
 
 
+# ── Preamble stripping (new FRED format) ─────────────────────────────────────
+
+
+def test_fred_preamble_stripped_columns():
+    """New FRED format with Title/Series ID/Source/Release preamble parses correctly."""
+    provider = FredProvider(_fetcher=lambda url: _load("DGS2_preamble.csv"))
+    hist = provider.get_history("DGS2")
+    assert list(hist.columns) == ["obs_date", "value"]
+
+
+def test_fred_preamble_stripped_row_count():
+    """Preamble rows are not counted as data rows."""
+    provider = FredProvider(_fetcher=lambda url: _load("DGS2_preamble.csv"))
+    hist = provider.get_history("DGS2")
+    assert len(hist) == 4  # 5 rows minus 1 missing
+
+
+def test_fred_preamble_stripped_drops_dot():
+    """Missing-value rows are still dropped after preamble stripping."""
+    provider = FredProvider(_fetcher=lambda url: _load("DGS2_preamble.csv"))
+    hist = provider.get_history("DGS2")
+    assert hist["value"].notna().all()
+    assert date(2024, 1, 5) not in hist["obs_date"].values
+
+
+def test_strip_preamble_passthrough():
+    """Old-format CSV (no preamble) passes through unchanged."""
+    from market_anomaly_detector.providers.fred import _strip_preamble
+
+    old_fmt = "DATE,DGS10\n2024-01-02,3.95\n2024-01-03,3.97\n"
+    assert _strip_preamble(old_fmt) == old_fmt
+
+
+def test_strip_preamble_finds_date_line():
+    """_strip_preamble returns text starting from the DATE header line."""
+    from market_anomaly_detector.providers.fred import _strip_preamble
+
+    new_fmt = "Title,Foo\nSeries ID,BAR\nDATE,BAR\n2024-01-01,1.0\n"
+    result = _strip_preamble(new_fmt)
+    assert result.startswith("DATE,BAR\n")
+    assert "Title" not in result
+
+
 # ── Date-range URL parameters ─────────────────────────────────────────────────
 
 

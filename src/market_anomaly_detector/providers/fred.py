@@ -22,6 +22,22 @@ from ._http import http_get
 _FREDGRAPH_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv"
 
 
+def _strip_preamble(text: str) -> str:
+    """Return text starting from the first line whose first token is 'DATE'.
+
+    FRED's fredgraph.csv endpoint sometimes prepends metadata lines (Title,
+    Series ID, Source, Release) before the actual DATE,VALUE header row.
+    This function skips those lines so pd.read_csv always sees a clean CSV.
+    Old-format responses (no preamble) pass through unchanged.
+    """
+    lines = text.splitlines(keepends=True)
+    for i, line in enumerate(lines):
+        token = line.strip().split(",")[0].strip().strip('"').upper()
+        if token == "DATE":
+            return "".join(lines[i:])
+    return text
+
+
 class FredProvider:
     """Fetch data from FRED using the public fredgraph.csv endpoint.
 
@@ -53,7 +69,7 @@ class FredProvider:
         url = f"{_FREDGRAPH_URL}?{urlencode(params)}"
 
         text = self._fetch(url)
-        df = pd.read_csv(io.StringIO(text))
+        df = pd.read_csv(io.StringIO(_strip_preamble(text)))
         if df.shape[1] < 2:
             raise ValueError(f"Unexpected FRED response for {symbol!r}: {text[:200]!r}")
 
