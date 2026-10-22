@@ -23,7 +23,7 @@ from market_anomaly_detector.features.build import (
     _z_score,
     build,
 )
-from market_anomaly_detector.features.spec import SPEC_V1, FeatureSpec
+from market_anomaly_detector.features.spec import SPEC_V1, SPEC_V2, FeatureSpec, spec_hash
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -1075,3 +1075,45 @@ def test_load_prices_source_instrument_id_set_without_fallbacks():
     df = result["my_inst"]
     assert "source_instrument_id" in df.columns
     assert (df["source_instrument_id"] == "my_inst").all()
+
+
+# ── spec_hash ────────────────────────────────────────────────────────────────
+
+
+def test_spec_hash_v1_pinned():
+    """spec_hash(SPEC_V1) must equal the value measured at commit 2dfa940.
+
+    Any edit to SPEC_V1 will change this hash and fail CI, which is the intent.
+    The hash covers col, instrument_id, instrument_id_2, transform, window,
+    and fallback_instrument_ids; it excludes label and units so cosmetic renames
+    don't trip the guard.
+    """
+    assert spec_hash(SPEC_V1) == "b8c2d65c449392a806bf30c8fc596785cab943aa08268fae4fff593b14ab8a3f"
+
+
+def test_spec_hash_v2_differs_from_v1():
+    """SPEC_V2 adds fallbacks to GBP/USD entries, so its hash must differ from V1."""
+    assert spec_hash(SPEC_V2) != spec_hash(SPEC_V1)
+
+
+def test_spec_hash_stable_across_calls():
+    """spec_hash is deterministic — identical inputs always produce the same digest."""
+    assert spec_hash(SPEC_V1) == spec_hash(SPEC_V1)
+
+
+def test_spec_hash_changes_on_col_edit():
+    """Renaming a col must change the hash (sanity-check the hash logic)."""
+    modified = [
+        FeatureSpec(
+            "vix_lr_1w_RENAMED" if f.col == "vix_lr_1w" else f.col,
+            f.label,
+            f.instrument_id,
+            f.units,
+            f.transform,
+            f.window,
+            f.instrument_id_2,
+            f.fallback_instrument_ids,
+        )
+        for f in SPEC_V1
+    ]
+    assert spec_hash(modified) != spec_hash(SPEC_V1)

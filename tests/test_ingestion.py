@@ -103,10 +103,10 @@ class CapturingSink:
     rows: list[dict] = field(default_factory=list)
     write_calls: int = 0
 
-    def write(self, rows: list[dict]) -> tuple[int, int]:
+    def write(self, rows: list[dict]) -> tuple[int, int, None, None]:
         self.write_calls += 1
         self.rows.extend(rows)
-        return (len(rows), 0)
+        return (len(rows), 0, None, None)
 
 
 @dataclass
@@ -116,7 +116,7 @@ class MemorySink:
     _seen: set = field(default_factory=set)
     rows: list[dict] = field(default_factory=list)
 
-    def write(self, rows: list[dict]) -> tuple[int, int]:
+    def write(self, rows: list[dict]) -> tuple[int, int, None, None]:
         new = 0
         for row in rows:
             key = (row["instrument_id"], row["provider"], row["obs_date"])
@@ -124,7 +124,7 @@ class MemorySink:
                 self._seen.add(key)
                 self.rows.append(row)
                 new += 1
-        return (new, 0)
+        return (new, 0, None, None)
 
 
 # ── Shared fixture data ───────────────────────────────────────────────────────
@@ -455,21 +455,114 @@ def test_staleness_weekly_stale_at_boundary():
 
 
 def test_staleness_monthly_not_stale():
-    """Monthly: 44 calendar days = not stale."""
-    today = date(2024, 3, 15)
-    last = date(2024, 1, 31)  # Feb(29) + 15 Mar = 44 days
+    """Monthly: 74 calendar days = not stale."""
+    today = date(2024, 4, 14)
+    last = date(2024, 1, 31)  # Feb(29) + Mar(31) + 14 Apr = 74 days
     assert not is_stale(last, "monthly", today)
 
 
 def test_staleness_monthly_stale_at_boundary():
-    """Monthly: 45 calendar days = stale."""
-    today = date(2024, 3, 15)
-    last = date(2024, 1, 30)  # 1 Jan + 29 Feb + 15 Mar = 45 days
+    """Monthly: 75 calendar days = stale."""
+    today = date(2024, 4, 15)
+    last = date(2024, 1, 31)  # Feb(29) + Mar(31) + 15 Apr = 75 days
     assert is_stale(last, "monthly", today)
 
 
 def test_staleness_no_data_always_stale():
     assert is_stale(None, "daily", date(2024, 1, 10))
+
+
+def test_staleness_publication_lag_shifts_threshold():
+    """A daily series that would be stale without lag is not stale when lag covers the gap."""
+    today = date(2024, 1, 10)  # Wednesday
+    # 5 bdays behind today → stale without lag
+    last = date(2024, 1, 3)
+    assert is_stale(last, "daily", today, publication_lag_days=0)
+    # With 3-day publication lag, effective_today = Jan 7 → only 2 bdays from last
+    assert not is_stale(last, "daily", today, publication_lag_days=3)
+
+
+def test_staleness_monthly_with_lag_not_stale():
+    """Monthly: series 80 days ago is stale without lag, not stale with 10-day lag."""
+    today = date(2024, 4, 10)
+    last = date(2024, 1, 21)  # (Apr 10 - Jan 21) = 80 days > 75 → stale
+    assert is_stale(last, "monthly", today, publication_lag_days=0)
+    # With 10-day lag: effective_today = Mar 31; (Mar 31 - Jan 21) = 70 days < 75 → not stale
+    assert not is_stale(last, "monthly", today, publication_lag_days=10)
+
+
+def test_staleness_monthly_oecd_lag40_gives_115_day_grace():
+    """OECD monthly source with publication_lag_days=40 gives 75+40=115 days total grace.
+
+    de/it/jp_10y_yield use FRED OECD monthly data published ~40 days after month end.
+    Data from up to 114 days ago is not stale; data from exactly 115 days ago is stale.
+    """
+    today = date(2024, 6, 1)
+    not_stale = date(2024, 2, 8)  # (Jun 1 - Feb 8) = 114 days < 115 → not stale
+    just_stale = date(2024, 2, 7)  # (Jun 1 - Feb 7) = 115 days ≥ 115 → stale
+    assert not is_stale(not_stale, "monthly", today, publication_lag_days=40)
+    assert is_stale(just_stale, "monthly", today, publication_lag_days=40)
+
+
+# ── Today-bar filtering ───────────────────────────────────────────────────────
+
+
+def test_backfill_today_bar_not_stored():
+    """Daily bar with obs_date == cutoff_date must not be stored."""
+    today = date(2024, 6, 5)
+    rows_with_today = [("2024-06-03", 100.0), ("2024-06-04", 101.0), ("2024-06-05", 102.0)]
+    inst = _inst("vix", [_src("yahoo", "^VIX", 1)])
+    sink = CapturingSink()
+
+    run_backfill(
+        [inst],
+        providers={"yahoo": FakeProvider("yahoo", {"^VIX": _df(rows_with_today)})},
+        sink=sink,
+        cutoff_date=today,
+    )
+
+    stored_dates = {row["obs_date"] for row in sink.rows}
+    assert date(2024, 6, 5) not in stored_dates
+    assert date(2024, 6, 4) in stored_dates
+    assert date(2024, 6, 3) in stored_dates
+
+
+def test_backfill_yesterday_bar_stored():
+    """Daily bar with obs_date == cutoff_date - 1 must be stored normally."""
+    today = date(2024, 6, 5)
+    inst = _inst("vix", [_src("yahoo", "^VIX", 1)])
+    sink = CapturingSink()
+
+    run_backfill(
+        [inst],
+        providers={"yahoo": FakeProvider("yahoo", {"^VIX": _df(_THREE_ROWS)})},
+        sink=sink,
+        cutoff_date=today,
+    )
+
+    # _THREE_ROWS has dates 2024-01-02/03/04, all before cutoff
+    assert len(sink.rows) == 3
+
+
+def test_backfill_monthly_source_not_filtered_by_cutoff():
+    """Monthly source: today-filtering does not drop rows (cutoff only for daily)."""
+    today = date(2024, 4, 1)
+    monthly_rows = [("2024-01-01", 2.5), ("2024-02-01", 2.6), ("2024-03-01", 2.7)]
+    inst = _inst(
+        "de_10y",
+        [_src("fred", "IRLTLT01DEM156N", 1, freq="monthly", lag=30)],
+        native_freq="monthly",
+    )
+    sink = CapturingSink()
+
+    run_backfill(
+        [inst],
+        providers={"fred": FakeProvider("fred", {"IRLTLT01DEM156N": _df(monthly_rows)})},
+        sink=sink,
+        cutoff_date=today,
+    )
+
+    assert len(sink.rows) == 3  # all three months stored, no today-filter for monthly
 
 
 # ── DB tests (require Postgres) ───────────────────────────────────────────────
@@ -582,6 +675,8 @@ def test_backfill_db_savepoint_isolates_write_failure(db_session):
     assert r_norm.rows_written == 2
     assert r_norm.rows_new == 2
     assert r_norm.rows_revised == 0
+    assert r_norm.max_abs_revision is None
+    assert r_norm.max_rel_revision is None
 
     # ── DB state: overflow instrument has no rows ─────────────────────────────
     overflow_count = db_session.execute(
@@ -614,3 +709,47 @@ def test_backfill_db_savepoint_isolates_write_failure(db_session):
     assert ok_item.rows_written == 2
     assert ok_item.rows_new == 2
     assert ok_item.rows_revised == 0
+
+
+@pytest.mark.db
+def test_backfill_repeated_unchanged_data_zero_revised(db_session):
+    """Re-running backfill with identical provider data must produce 0 revised rows.
+
+    Verifies the no-look-ahead guarantee for non-adjusted indices: a second
+    identical fetch must not trigger spurious revisions (rows_revised == 0 and
+    max_abs_revision is None).
+    """
+    from market_anomaly_detector.ingestion import PostgresPriceSink
+
+    _insert_instrument_row(db_session, "gspc_test")
+    db_session.flush()
+
+    inst = _inst(
+        "gspc_test",
+        [_src("yahoo", "^GSPC", 1, auto_adjust=False)],
+        asset_class=AssetClass.equity_index,
+    )
+    fixture_data = [
+        ("2024-01-02", 4700.0),
+        ("2024-01-03", 4710.5),
+        ("2024-01-04", 4695.2),
+        ("2024-01-05", 4720.0),
+        ("2024-01-08", 4730.1),
+    ]
+    provider = FakeProvider("yahoo", {"^GSPC": _df(fixture_data)})
+    sink = PostgresPriceSink(db_session)
+
+    r1 = run_backfill([inst], providers={"yahoo": provider}, sink=sink, session=db_session)
+    db_session.flush()
+    assert r1[0].status == "ok"
+    assert r1[0].rows_new == 5
+    assert r1[0].rows_revised == 0
+    assert r1[0].max_abs_revision is None
+
+    r2 = run_backfill([inst], providers={"yahoo": provider}, sink=sink, session=db_session)
+    db_session.flush()
+    assert r2[0].status == "ok"
+    assert r2[0].rows_new == 0
+    assert r2[0].rows_revised == 0
+    assert r2[0].max_abs_revision is None
+    assert r2[0].max_rel_revision is None

@@ -106,16 +106,35 @@ class CoverageReport:
 # ── Public helpers (testable offline, no DB) ──────────────────────────────────
 
 
-def find_gaps(obs_dates: list[date], min_bdays: int = _GAP_BDAYS) -> list[GapRecord]:
-    """Return gaps longer than *min_bdays* business days in an obs_date list."""
+def find_gaps(
+    obs_dates: list[date],
+    source_frequency: str = "daily",
+    min_bdays: int = _GAP_BDAYS,
+) -> list[GapRecord]:
+    """Return gaps in an obs_date list, respecting the source's cadence.
+
+    For monthly sources consecutive calendar months are never flagged; only a
+    skipped month (> 32 calendar days) counts as a gap.  For weekly sources
+    the threshold is > 12 calendar days.  For daily sources the existing
+    business-day logic applies.
+    """
     sorted_dates = sorted(obs_dates)
     gaps: list[GapRecord] = []
     for i in range(1, len(sorted_dates)):
         a = sorted_dates[i - 1]
         b = sorted_dates[i]
-        bdays = int(np.busday_count(a.isoformat(), b.isoformat()))
-        if bdays > min_bdays:
-            gaps.append(GapRecord(start=a, end=b, bdays=bdays))
+        if source_frequency == "monthly":
+            if (b - a).days > 32:
+                bdays = int(np.busday_count(a.isoformat(), b.isoformat()))
+                gaps.append(GapRecord(start=a, end=b, bdays=bdays))
+        elif source_frequency == "weekly":
+            if (b - a).days > 12:
+                bdays = int(np.busday_count(a.isoformat(), b.isoformat()))
+                gaps.append(GapRecord(start=a, end=b, bdays=bdays))
+        else:
+            bdays = int(np.busday_count(a.isoformat(), b.isoformat()))
+            if bdays > min_bdays:
+                gaps.append(GapRecord(start=a, end=b, bdays=bdays))
     return gaps
 
 
@@ -126,6 +145,7 @@ def compare_fidelity(
     units: str,
     source_frequency: str,
     is_exact: bool,
+    compute_level_ratio: bool = True,
 ) -> FidelityComparison:
     """Compare a live series against the bloomberg_ews reference.
 
@@ -179,7 +199,7 @@ def compare_fidelity(
     corr = _correlation(live_chg, ews_chg)
 
     sign_inverted = corr is not None and corr < _INVERSION_THRESHOLD
-    level_ratio = _level_ratio(live_vals, ews_vals) if is_exact else None
+    level_ratio = _level_ratio(live_vals, ews_vals) if (is_exact and compute_level_ratio) else None
 
     if corr is None:
         suggested = "review_required"
@@ -228,6 +248,8 @@ def build_report(
 
     rows: list[CoverageRow] = []
     for inst in instruments:
+        if not getattr(inst, "active", True):
+            continue
         rows.append(_build_row(inst, prices, today))
 
     # Unoverridden mismatches first, then alphabetical by ID
@@ -371,12 +393,12 @@ def _build_row(
         first_date: Optional[date] = min(obs_dates)
         last_date: Optional[date] = max(obs_dates)
         row_count = len(chosen_df)
-        gaps = find_gaps(obs_dates)
         freq = (
             chosen_src.source_frequency.value
             if chosen_src is not None and chosen_src.source_frequency is not None
             else inst.native_frequency.value
         )
+        gaps = find_gaps(obs_dates, source_frequency=freq)
         stale = is_stale(last_date, freq, today)
     else:
         first_date = last_date = None
@@ -404,6 +426,7 @@ def _build_row(
             units=inst.units.value,
             source_frequency=src_freq,
             is_exact=is_exact,
+            compute_level_ratio=getattr(chosen_src, "compare_level", True),
         )
 
     # ── Fidelity mismatch ─────────────────────────────────────────────────────
@@ -615,7 +638,8 @@ def _render_markdown(report: CoverageReport) -> list[str]:
             "|---|---|---|---|",
         ]
         for r in report.rows:
-            for g in r.gaps:
+            top_gaps = sorted(r.gaps, key=lambda g: g.bdays, reverse=True)[:20]
+            for g in top_gaps:
                 lines.append(f"| {r.instrument_id} | {g.start} | {g.end} | {g.bdays} |")
     else:
         lines.append("No gaps over 5 business days found.")

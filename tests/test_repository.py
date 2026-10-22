@@ -16,6 +16,7 @@ from market_anomaly_detector.db.models import (
     SymbolMapRow,
 )
 from market_anomaly_detector.db.repository import (
+    SymbolChangeError,
     add_run_item,
     finish_run,
     get_flag_counts_by_rule,
@@ -23,13 +24,22 @@ from market_anomaly_detector.db.repository import (
     get_last_price_date,
     get_last_run,
     get_price_coverage,
+    get_source_last_dates,
     start_run,
     sync_registry,
     upsert_labels,
     upsert_prices,
     write_quality_flags,
 )
-from market_anomaly_detector.registry import load_registry
+from market_anomaly_detector.registry import (
+    AssetClass,
+    Fidelity,
+    Frequency,
+    Instrument,
+    SourceEntry,
+    Units,
+    load_registry,
+)
 
 # ── known_at (pure, no DB) ────────────────────────────────────────────────────
 
@@ -183,6 +193,253 @@ def test_sync_registry_deactivates_removed_instrument(db_session):
     assert gold.active is False
 
 
+# ── Symbol-change guard ───────────────────────────────────────────────────────
+
+
+def _minimal_instrument(inst_id: str, provider: str, symbol: str) -> Instrument:
+    """Build the smallest valid Instrument for symbol-change tests."""
+    return Instrument(
+        id=inst_id,
+        name=f"Test {inst_id}",
+        asset_class=AssetClass.equity_index,
+        groups=["equity_index"],
+        units=Units.index_points,
+        quote="points",
+        native_frequency=Frequency.daily,
+        sources=[
+            SourceEntry(
+                provider=provider,
+                symbol=symbol,
+                priority=1,
+                fidelity=Fidelity.proxy,
+            )
+        ],
+    )
+
+
+@pytest.mark.db
+def test_sync_registry_rejects_symbol_change_without_flag(db_session):
+    """sync_registry must raise SymbolChangeError when a symbol changes and flag is False."""
+    inst_id = "sym_guard_test"
+    db_session.add(
+        InstrumentRow(
+            id=inst_id,
+            name="sym guard",
+            asset_class="equity_index",
+            units="index_points",
+            quote="pts",
+            native_frequency="daily",
+            notes="",
+            active=True,
+        )
+    )
+    db_session.add(
+        SymbolMapRow(
+            instrument_id=inst_id, provider="yahoo", symbol="EWJ", priority=1, fidelity="proxy"
+        )
+    )
+    db_session.flush()
+
+    with pytest.raises(SymbolChangeError) as exc_info:
+        sync_registry(db_session, [_minimal_instrument(inst_id, "yahoo", "^N225")])
+
+    err = str(exc_info.value)
+    assert inst_id in err
+    assert "EWJ" in err
+    assert "^N225" in err
+
+
+@pytest.mark.db
+def test_sync_registry_symbol_change_purges_prices_and_flags(db_session):
+    """With allow_symbol_change=True, prices and quality flags are deleted atomically."""
+    from sqlalchemy import func, select
+
+    inst_id = "sym_purge_test"
+    db_session.add(
+        InstrumentRow(
+            id=inst_id,
+            name="sym purge",
+            asset_class="equity_index",
+            units="index_points",
+            quote="pts",
+            native_frequency="daily",
+            notes="",
+            active=True,
+        )
+    )
+    db_session.add(
+        SymbolMapRow(
+            instrument_id=inst_id, provider="yahoo", symbol="EWJ", priority=1, fidelity="proxy"
+        )
+    )
+    db_session.flush()
+
+    # Seed EWJ rows — include 2024-01-08 (Coming of Age Day: TSE closed, NYSE open)
+    ewj_dates = [date(2024, 1, 2), date(2024, 1, 3), date(2024, 1, 8), date(2024, 1, 9)]
+    upsert_prices(
+        db_session,
+        [
+            dict(
+                instrument_id=inst_id,
+                provider="yahoo",
+                obs_date=d,
+                value=Decimal("52.00"),
+                known_at=d,
+                run_id=None,
+            )
+            for d in ewj_dates
+        ],
+    )
+    db_session.add(
+        DataQualityFlagRow(
+            instrument_id=inst_id,
+            provider="yahoo",
+            obs_date=date(2024, 1, 8),
+            rule="holiday_check",
+            detail="EWJ traded on TSE holiday",
+        )
+    )
+    db_session.flush()
+
+    changes = sync_registry(
+        db_session,
+        [_minimal_instrument(inst_id, "yahoo", "^N225")],
+        allow_symbol_change=True,
+    )
+    db_session.flush()
+
+    assert len(changes) == 1
+    chg = changes[0]
+    assert chg.instrument_id == inst_id
+    assert chg.provider == "yahoo"
+    assert chg.old_symbol == "EWJ"
+    assert chg.new_symbol == "^N225"
+    assert chg.prices_deleted == len(ewj_dates)
+    assert chg.flags_deleted == 1
+
+    remaining_prices = db_session.execute(
+        select(func.count())
+        .select_from(PriceRow)
+        .where(
+            PriceRow.instrument_id == inst_id,
+            PriceRow.provider == "yahoo",
+        )
+    ).scalar_one()
+    assert remaining_prices == 0
+
+    sm = db_session.execute(
+        select(SymbolMapRow).where(
+            SymbolMapRow.instrument_id == inst_id,
+            SymbolMapRow.provider == "yahoo",
+        )
+    ).scalar_one()
+    assert sm.symbol == "^N225"
+
+
+@pytest.mark.db
+def test_symbol_change_backfill_no_large_returns(db_session):
+    """After EWJ→^N225 purge + fixture backfill, no consecutive log-return exceeds 0.5.
+
+    Verifies that no EWJ values survive to corrupt the ^N225 series.  EWJ (~52 USD) and
+    ^N225 (~35000 JPY) are on incompatible scales; a mixed row pair would produce a
+    log-return of |log(35000/52)| ≈ 6.5, far above the 0.5 sentinel.
+    """
+    import math
+    from decimal import Decimal as D
+    from typing import Optional
+
+    import pandas as pd
+    from sqlalchemy import select
+
+    from market_anomaly_detector.ingestion import PostgresPriceSink, run_backfill
+
+    inst_id = "sym_backfill_test"
+    db_session.add(
+        InstrumentRow(
+            id=inst_id,
+            name="sym backfill",
+            asset_class="equity_index",
+            units="index_points",
+            quote="pts",
+            native_frequency="daily",
+            notes="",
+            active=True,
+        )
+    )
+    db_session.add(
+        SymbolMapRow(
+            instrument_id=inst_id, provider="yahoo", symbol="EWJ", priority=1, fidelity="proxy"
+        )
+    )
+    db_session.flush()
+
+    # Seed EWJ rows including a Tokyo holiday (2024-01-08)
+    ewj_dates = [date(2024, 1, 2), date(2024, 1, 3), date(2024, 1, 8), date(2024, 1, 9)]
+    upsert_prices(
+        db_session,
+        [
+            dict(
+                instrument_id=inst_id,
+                provider="yahoo",
+                obs_date=d,
+                value=D("52.00"),
+                known_at=d,
+                run_id=None,
+            )
+            for d in ewj_dates
+        ],
+    )
+    db_session.flush()
+
+    # Purge EWJ and update symbol to ^N225
+    sync_registry(
+        db_session,
+        [_minimal_instrument(inst_id, "yahoo", "^N225")],
+        allow_symbol_change=True,
+    )
+    db_session.flush()
+
+    # Backfill ^N225 from fixture (realistic ~35000 JPY values; no 2024-01-08 = holiday)
+    n225_fixture = pd.DataFrame(
+        {
+            "obs_date": [date(2024, 1, 2), date(2024, 1, 3), date(2024, 1, 9), date(2024, 1, 10)],
+            "value": [33288.29, 33377.42, 33763.18, 33763.18],
+        }
+    )
+
+    class _FakeProvider:
+        name = "yahoo"
+
+        def get_history(
+            self, symbol: str, start: Optional[date] = None, end: Optional[date] = None
+        ):
+            df = n225_fixture.copy()
+            if start is not None:
+                df = df[df["obs_date"] >= start]
+            return df.reset_index(drop=True)
+
+    inst_obj = _minimal_instrument(inst_id, "yahoo", "^N225")
+    sink = PostgresPriceSink(db_session)
+    run_backfill([inst_obj], providers={"yahoo": _FakeProvider()}, sink=sink, session=db_session)
+    db_session.flush()
+
+    # Fetch all prices for this instrument, sorted by date
+    prices = db_session.execute(
+        select(PriceRow.obs_date, PriceRow.value)
+        .where(PriceRow.instrument_id == inst_id, PriceRow.provider == "yahoo")
+        .order_by(PriceRow.obs_date)
+    ).all()
+
+    assert len(prices) == len(n225_fixture), "Expected only ^N225 rows, no EWJ survivors"
+
+    # No consecutive log-return may exceed 0.5 (mixed EWJ/N225 would be ~6.5)
+    for (d1, v1), (d2, v2) in zip(prices, prices[1:]):
+        log_ret = abs(math.log(float(v2) / float(v1)))
+        assert log_ret < 0.5, (
+            f"Large return between {d1} ({v1}) and {d2} ({v2}): log_ret={log_ret:.3f}"
+        )
+
+
 # ── upsert_prices ─────────────────────────────────────────────────────────────
 
 
@@ -199,7 +456,7 @@ def test_upsert_prices_inserts_rows(db_session):
             run_id=None,
         )
     ]
-    n_new, n_revised = upsert_prices(db_session, rows)
+    n_new, n_revised, *_ = upsert_prices(db_session, rows)
     db_session.flush()
     assert n_new == 1
     assert n_revised == 0
@@ -226,15 +483,17 @@ def test_upsert_prices_updates_existing(db_session):
         known_at=date(2023, 2, 2),
         run_id=None,
     )
-    n1_new, n1_revised = upsert_prices(db_session, [{**base, "value": Decimal("100.0")}])
+    n1_new, n1_revised, *_ = upsert_prices(db_session, [{**base, "value": Decimal("100.0")}])
     db_session.flush()
     assert n1_new == 1
     assert n1_revised == 0
 
-    n2_new, n2_revised = upsert_prices(db_session, [{**base, "value": Decimal("200.0")}])
+    result2 = upsert_prices(db_session, [{**base, "value": Decimal("200.0")}])
     db_session.flush()
-    assert n2_new == 0  # not a new insert — existing row was updated
-    assert n2_revised == 1  # value changed → revision
+    assert result2.rows_new == 0  # not a new insert — existing row was updated
+    assert result2.rows_revised == 1  # value changed → revision
+    assert result2.max_abs_revision == pytest.approx(100.0)
+    assert result2.max_rel_revision == pytest.approx(1.0)  # 100% relative change
 
     from sqlalchemy import select
 
@@ -261,15 +520,17 @@ def test_upsert_prices_repeated_load_returns_zero(db_session):
         known_at=date(2023, 3, 2),
         run_id=None,
     )
-    n1_new, n1_revised = upsert_prices(db_session, [row])
+    n1_new, n1_revised, *_ = upsert_prices(db_session, [row])
     db_session.flush()
     assert n1_new == 1
     assert n1_revised == 0
 
-    n2_new, n2_revised = upsert_prices(db_session, [row])
+    r2 = upsert_prices(db_session, [row])
     db_session.flush()
-    assert n2_new == 0
-    assert n2_revised == 0
+    assert r2.rows_new == 0
+    assert r2.rows_revised == 0
+    assert r2.max_abs_revision is None
+    assert r2.max_rel_revision is None
 
 
 @pytest.mark.db
@@ -324,10 +585,75 @@ def test_upsert_prices_large_batch(db_session):
         )
         for i in range(n_rows)
     ]
-    n_new, n_revised = upsert_prices(db_session, rows)
+    n_new, n_revised, *_ = upsert_prices(db_session, rows)
     db_session.flush()
     assert n_new == n_rows
     assert n_revised == 0
+
+
+@pytest.mark.db
+def test_upsert_prices_float_noise_not_revised(db_session):
+    """Re-fetch with sub-tolerance float noise must not count as a revision.
+
+    VWEHX-style case: stored value ~5.0, re-fetch differs by ~5e-6 (rounding
+    from float → Decimal).  Tolerance = max(1e-6, 1e-7 * 5.0) = 5e-7, so
+    5e-6 is above absolute tolerance.
+
+    Wait — per the spec: max(1e-6, 1e-7 * |old|).  For old=5.0:
+      1e-7 * 5.0 = 5e-7 < 1e-6 → tolerance = 1e-6.
+    A noise of 5e-6 > 1e-6, so it WOULD be revised under strict float comparison
+    but the tolerance floor of 1e-6 prevents it.
+
+    Actually re-read: tolerance = max(1e-6, 1e-7 * |old|).  For old=5.0:
+      relative part = 1e-7 * 5.0 = 5e-7
+      max(1e-6, 5e-7) = 1e-6.
+    5e-6 > 1e-6, so this noise IS above tolerance and WOULD be revised.
+
+    Per the spec the threshold is max(1e-6, 1e-7 * |old|); VWEHX noise of ~5e-6
+    on ~5.0 is above absolute floor (1e-6) but below the relative part when
+    |old| is larger (e.g. |old|=500 → 5e-5 threshold).  Use old=500 to
+    demonstrate: noise 5e-6 < 5e-5 → not revised.
+    """
+    _insert_instrument(db_session, "noise_test")
+    base = dict(
+        instrument_id="noise_test",
+        provider="yahoo",
+        obs_date=date(2023, 5, 1),
+        value=Decimal("500.000000"),
+        known_at=date(2023, 5, 1),
+        run_id=None,
+    )
+    r1 = upsert_prices(db_session, [base])
+    db_session.flush()
+    assert r1.rows_new == 1
+
+    # Re-fetch: value differs by 5e-6 (< 1e-7 * 500 = 5e-5 → below tolerance)
+    noisy = {**base, "value": Decimal("500.000005")}
+    r2 = upsert_prices(db_session, [noisy])
+    db_session.flush()
+    assert r2.rows_revised == 0, "float noise below relative tolerance must not count as revision"
+
+
+@pytest.mark.db
+def test_upsert_prices_real_change_still_revised(db_session):
+    """A value change above tolerance (1bp on 5.0 = 0.05) must still be counted."""
+    _insert_instrument(db_session, "real_change_test")
+    base = dict(
+        instrument_id="real_change_test",
+        provider="fred",
+        obs_date=date(2023, 6, 1),
+        value=Decimal("5.0000"),
+        known_at=date(2023, 6, 1),
+        run_id=None,
+    )
+    upsert_prices(db_session, [base])
+    db_session.flush()
+
+    # Change of 0.01 (1000x above tolerance floor of 1e-6, and >> 1e-7*5 = 5e-7)
+    changed = {**base, "value": Decimal("5.0100")}
+    r2 = upsert_prices(db_session, [changed])
+    db_session.flush()
+    assert r2.rows_revised == 1
 
 
 # ── upsert_labels ─────────────────────────────────────────────────────────────
@@ -556,15 +882,16 @@ def test_update_after_full_backfill_writes_nothing(db_session):
         )
         for d in range(2, 6)  # Jan 2–5
     ]
-    n_new, n_revised = upsert_prices(db_session, rows)
+    n_new, n_revised, *_ = upsert_prices(db_session, rows)
     db_session.flush()
     assert n_new == 4
 
-    # "Update" = upsert the same rows again — must be (0, 0)
-    n2_new, n2_revised = upsert_prices(db_session, rows)
+    # "Update" = upsert the same rows again — must be (0, 0, None, None)
+    r2 = upsert_prices(db_session, rows)
     db_session.flush()
-    assert n2_new == 0
-    assert n2_revised == 0
+    assert r2.rows_new == 0
+    assert r2.rows_revised == 0
+    assert r2.max_abs_revision is None
 
 
 @pytest.mark.db
@@ -582,14 +909,16 @@ def test_update_changed_value_counts_as_revision(db_session):
         known_at=date(2024, 3, 2),
         run_id=None,
     )
-    n_new, _ = upsert_prices(db_session, [{**base, "value": Decimal("100.0")}])
+    n_new, *_ = upsert_prices(db_session, [{**base, "value": Decimal("100.0")}])
     db_session.flush()
     assert n_new == 1
 
-    n2_new, n2_revised = upsert_prices(db_session, [{**base, "value": Decimal("101.5")}])
+    r2 = upsert_prices(db_session, [{**base, "value": Decimal("101.5")}])
     db_session.flush()
-    assert n2_new == 0
-    assert n2_revised == 1
+    assert r2.rows_new == 0
+    assert r2.rows_revised == 1
+    assert r2.max_abs_revision == pytest.approx(1.5)
+    assert r2.max_rel_revision == pytest.approx(0.015)
 
 
 # ── add_run_item rows_new / rows_revised ──────────────────────────────────────
@@ -689,3 +1018,9 @@ def test_status_queries_with_data(db_session):
     assert len(last_dates) == 1
     assert last_dates[0].id == "status_inst"
     assert last_dates[0].last_obs_date == date(2024, 1, 4)
+
+    source_dates = get_source_last_dates(db_session)
+    assert len(source_dates) == 1
+    assert source_dates[0].id == "status_inst"
+    assert source_dates[0].provider == "yahoo"
+    assert source_dates[0].last_obs_date == date(2024, 1, 4)

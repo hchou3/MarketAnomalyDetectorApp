@@ -159,6 +159,26 @@ def test_unit_error_level_ratio_skipped_for_proxy():
     assert result.median_level_ratio is None
 
 
+def test_compare_level_false_suppresses_level_ratio_for_exact_source():
+    """Level ratio must be None when compare_level=False even for an exact source."""
+    dates = _weekly_dates(_START_TUE, _N_SUFFICIENT)
+    vals = [100.0 + i * 0.5 for i in range(_N_SUFFICIENT)]
+
+    # Live series at 10x scale (like ^GSPC vs MXUS)
+    live = _df(dates, [v * 10 for v in vals])
+    ews = _df(dates, vals)
+
+    result = compare_fidelity(
+        live, ews, units="price", source_frequency="daily", is_exact=True, compute_level_ratio=False
+    )
+
+    assert result.sufficient
+    assert result.change_correlation is not None
+    assert result.change_correlation > 0.99
+    # Level ratio suppressed because the series are on different scales
+    assert result.median_level_ratio is None
+
+
 # ── compare_fidelity: yield near zero or negative ─────────────────────────────
 
 
@@ -380,6 +400,41 @@ def test_find_gaps_just_over_boundary():
     gaps = find_gaps([d1, d2], min_bdays=5)
     assert len(gaps) == 1
     assert gaps[0].bdays == 6
+
+
+def test_find_gaps_monthly_consecutive_months_not_flagged():
+    """Consecutive monthly observations (28–31 days apart) must not be gaps."""
+    months = [
+        date(2024, 1, 31),
+        date(2024, 2, 29),
+        date(2024, 3, 31),
+        date(2024, 4, 30),
+    ]
+    assert not find_gaps(months, source_frequency="monthly")
+
+
+def test_find_gaps_monthly_skipped_month_flagged():
+    """A skipped month (> 32 calendar days) must be flagged."""
+    d1 = date(2024, 1, 31)
+    d2 = date(2024, 3, 31)  # 60 days — one month skipped
+    gaps = find_gaps([d1, d2], source_frequency="monthly")
+    assert len(gaps) == 1
+    assert gaps[0].start == d1
+    assert gaps[0].end == d2
+
+
+def test_find_gaps_weekly_no_gap():
+    """Consecutive weekly observations (7 days apart) must not be flagged."""
+    dates = [date(2024, 1, 2) + timedelta(weeks=i) for i in range(5)]
+    assert not find_gaps(dates, source_frequency="weekly")
+
+
+def test_find_gaps_weekly_skipped_week_flagged():
+    """A skipped week (> 12 calendar days) must be flagged."""
+    d1 = date(2024, 1, 2)
+    d2 = date(2024, 1, 16)  # 14 days — one week skipped
+    gaps = find_gaps([d1, d2], source_frequency="weekly")
+    assert len(gaps) == 1
 
 
 # ── compare_fidelity: tolerance prevents gap bridging ────────────────────────
