@@ -491,6 +491,19 @@ def test_staleness_monthly_with_lag_not_stale():
     assert not is_stale(last, "monthly", today, publication_lag_days=10)
 
 
+def test_staleness_monthly_oecd_lag40_gives_115_day_grace():
+    """OECD monthly source with publication_lag_days=40 gives 75+40=115 days total grace.
+
+    de/it/jp_10y_yield use FRED OECD monthly data published ~40 days after month end.
+    Data from up to 114 days ago is not stale; data from exactly 115 days ago is stale.
+    """
+    today = date(2024, 6, 1)
+    not_stale = date(2024, 2, 8)  # (Jun 1 - Feb 8) = 114 days < 115 → not stale
+    just_stale = date(2024, 2, 7)  # (Jun 1 - Feb 7) = 115 days ≥ 115 → stale
+    assert not is_stale(not_stale, "monthly", today, publication_lag_days=40)
+    assert is_stale(just_stale, "monthly", today, publication_lag_days=40)
+
+
 # ── Today-bar filtering ───────────────────────────────────────────────────────
 
 

@@ -15,6 +15,7 @@ spread      : (P1[t] - P2[t]) * 100  in basis points    (percent, two instrument
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field
 
 
@@ -31,6 +32,28 @@ class FeatureSpec:
     # load_prices splices them in ascending date order before the primary's first row,
     # using only entries rated "proxy" or "exact" in the coverage report.
     fallback_instrument_ids: list[str] = field(default_factory=list)
+
+
+def spec_hash(spec: list[FeatureSpec]) -> str:
+    """SHA-256 of the FeatureSpec content (col, instrument_id, instrument_id_2,
+    transform, window, fallback_instrument_ids).  label and units are excluded
+    so cosmetic renames don't invalidate the hash.  Used to detect accidental
+    edits to a frozen spec (e.g. SPEC_V1).
+    """
+    h = hashlib.sha256()
+    for feat in spec:
+        row = "|".join(
+            [
+                feat.col,
+                feat.instrument_id,
+                feat.instrument_id_2,
+                feat.transform,
+                str(feat.window),
+                ",".join(feat.fallback_instrument_ids),
+            ]
+        )
+        h.update((row + "\n").encode("utf-8"))
+    return h.hexdigest()
 
 
 def validate_spec_fallbacks(spec: list[FeatureSpec], instruments: list) -> None:
@@ -140,41 +163,13 @@ SPEC_V1: list[FeatureSpec] = [
         "usdjpy_z_1w", "USD/JPY, z-score of 1w return (156w)", "usd_jpy", "price", "z_score", 156
     ),
     # ── GBP/USD (price) ───────────────────────────────────────────────────────
+    FeatureSpec("gbpusd_lr_1w", "GBP/USD, 1-week log return", "gbp_usd", "price", "log_return", 1),
+    FeatureSpec("gbpusd_lr_4w", "GBP/USD, 4-week log return", "gbp_usd", "price", "log_return", 4),
     FeatureSpec(
-        "gbpusd_lr_1w",
-        "GBP/USD, 1-week log return",
-        "gbp_usd",
-        "price",
-        "log_return",
-        1,
-        fallback_instrument_ids=["gbp_usd_fred"],
+        "gbpusd_lr_12w", "GBP/USD, 12-week log return", "gbp_usd", "price", "log_return", 12
     ),
     FeatureSpec(
-        "gbpusd_lr_4w",
-        "GBP/USD, 4-week log return",
-        "gbp_usd",
-        "price",
-        "log_return",
-        4,
-        fallback_instrument_ids=["gbp_usd_fred"],
-    ),
-    FeatureSpec(
-        "gbpusd_lr_12w",
-        "GBP/USD, 12-week log return",
-        "gbp_usd",
-        "price",
-        "log_return",
-        12,
-        fallback_instrument_ids=["gbp_usd_fred"],
-    ),
-    FeatureSpec(
-        "gbpusd_z_1w",
-        "GBP/USD, z-score of 1w return (156w)",
-        "gbp_usd",
-        "price",
-        "z_score",
-        156,
-        fallback_instrument_ids=["gbp_usd_fred"],
+        "gbpusd_z_1w", "GBP/USD, z-score of 1w return (156w)", "gbp_usd", "price", "z_score", 156
     ),
     # ── Gold (price) ──────────────────────────────────────────────────────────
     FeatureSpec("gold_lr_1w", "Gold, 1-week log return", "gold", "price", "log_return", 1),
@@ -308,4 +303,26 @@ SPEC_V1: list[FeatureSpec] = [
         "z_score",
         156,
     ),
+]
+
+
+# ── Feature set v2 ────────────────────────────────────────────────────────────
+# Extends v1 with FRED fallback splicing for GBP/USD and USD/JPY.
+# GBP/USD + USD/JPY: FRED H.10 releases carry history back to 1971;
+# spliced as proxy before Yahoo's reliable start (~2003-12-01).
+
+SPEC_V2: list[FeatureSpec] = [
+    feat
+    if feat.col not in {"gbpusd_lr_1w", "gbpusd_lr_4w", "gbpusd_lr_12w", "gbpusd_z_1w"}
+    else FeatureSpec(
+        feat.col,
+        feat.label,
+        feat.instrument_id,
+        feat.units,
+        feat.transform,
+        feat.window,
+        feat.instrument_id_2,
+        fallback_instrument_ids=["gbp_usd_fred"],
+    )
+    for feat in SPEC_V1
 ]

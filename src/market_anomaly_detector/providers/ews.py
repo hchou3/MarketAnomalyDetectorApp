@@ -133,7 +133,9 @@ def load_ews(
                         }
                         for row in hist.itertuples(index=False)
                     ]
-                    n_new, n_revised = upsert_prices(session, rows)
+                    result = upsert_prices(session, rows)
+                    n_new = result.rows_new
+                    n_revised = result.rows_revised
                     n = n_new + n_revised
                     first_date = rows[0]["obs_date"]
                     last_date = rows[-1]["obs_date"]

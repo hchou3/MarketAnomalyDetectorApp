@@ -454,7 +454,7 @@
       priority: 1
       fidelity: proxy
       source_frequency: monthly
-      publication_lag_days: 28
+      publication_lag_days: 40
       notes: OECD monthly series; published ~5-6 weeks after month end. Best available public source for the Bund.
     - provider: bloomberg_ews
       symbol: GTDEM10Y
@@ -528,7 +528,7 @@
       priority: 1
       fidelity: proxy
       source_frequency: monthly
-      publication_lag_days: 28
+      publication_lag_days: 40
       notes: OECD monthly series; published ~5-6 weeks after month end.
     - provider: bloomberg_ews
       symbol: GTITL10YR
@@ -588,7 +588,7 @@
       priority: 1
       fidelity: proxy
       source_frequency: monthly
-      publication_lag_days: 28
+      publication_lag_days: 40
       notes: OECD monthly series; published ~5-6 weeks after month end.
     - provider: bloomberg_ews
       symbol: GTJPY10YR
