@@ -276,3 +276,14 @@ and 8 are updated. The old CSV-based `train.py`/`backtest.py` path is kept only 
 - **Adjusted ETF history changes** (v2 only) after dividends; features must be rebuilt
   from current data, not cached.
 - **Results may not beat the VIX rule.** That is a valid finding and must be reported.
+
+---
+
+## 8. Deferred (next model version)
+
+Items deferred after the confirmation run. Not in Phase 2 scope; record here for v2 planning.
+
+| # | Item | Motivation |
+|---|------|-----------|
+| D1 | **Week-weighted event precision** | Event F1 and FA-run counting are both misleading when a model stays on continuously (see `2026-10-21-final-confirmation-addendum.md`). A per-week precision metric (calm-week FAR and stress-week recall) should replace or supplement event F1 in the Phase 2 acceptance checks. |
+| D2 | **Step 2.4b experiment conclusions** | The `hgb-experiments` command in `src/market_anomaly_detector/hgb_experiments.py` evaluates 6 HGB variants on dev folds. Results have not been analysed; run `mad-model hgb-experiments` on a populated DB and document which variants (if any) improve on the frozen config. |
