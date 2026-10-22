@@ -9,6 +9,24 @@ from __future__ import annotations
 import argparse
 
 import pytest
+import sqlalchemy as sa
+
+from market_anomaly_detector.db.models import Base
+
+
+@pytest.fixture()
+def clean_db(db_engine):
+    """Truncate all model tables after a test that must commit outside db_session.
+
+    _cmd_report opens its own engine+session, so setup data must be committed.
+    This fixture cleans up that committed data so subsequent tests see a fresh DB.
+    """
+    yield
+    with db_engine.connect() as conn:
+        for table in reversed(Base.metadata.sorted_tables):
+            conn.execute(sa.text(f"DELETE FROM {table.name}"))
+        conn.commit()
+
 
 # ── Unit: subcommand is registered ───────────────────────────────────────────
 
@@ -47,7 +65,7 @@ def test_cmd_report_importable():
 
 
 @pytest.mark.db
-def test_cmd_report_runs_on_seeded_db(db_engine, tmp_path):
+def test_cmd_report_runs_on_seeded_db(db_engine, tmp_path, clean_db):
     """mad-data report completes without error on a registry-seeded database."""
     from sqlalchemy.orm import Session
 
@@ -73,7 +91,7 @@ def test_cmd_report_runs_on_seeded_db(db_engine, tmp_path):
 
 
 @pytest.mark.db
-def test_cmd_report_check_exits_zero_when_no_data(db_engine, tmp_path):
+def test_cmd_report_check_exits_zero_when_no_data(db_engine, tmp_path, clean_db):
     """--check exits 0 when there is no price data (no mismatches possible)."""
     from sqlalchemy.orm import Session
 

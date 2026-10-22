@@ -974,6 +974,16 @@ def test_status_queries_with_data(db_session):
     from market_anomaly_detector.validation import ValidationFlag
 
     _insert_instrument(db_session, "status_inst")
+    # get_source_last_dates JOINs SymbolMapRow; seed one so the source appears.
+    db_session.add(
+        SymbolMapRow(
+            instrument_id="status_inst",
+            provider="fred",
+            symbol="TEST_FRED",
+            priority=1,
+            fidelity="exact",
+        )
+    )
     db_session.flush()
 
     rows = [
@@ -1022,5 +1032,5 @@ def test_status_queries_with_data(db_session):
     source_dates = get_source_last_dates(db_session)
     assert len(source_dates) == 1
     assert source_dates[0].id == "status_inst"
-    assert source_dates[0].provider == "yahoo"
+    assert source_dates[0].provider == "fred"
     assert source_dates[0].last_obs_date == date(2024, 1, 4)

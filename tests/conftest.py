@@ -69,9 +69,18 @@ def db_engine():
 
 @pytest.fixture()
 def db_session(db_engine):
-    with Session(db_engine) as sess:
+    # Wrap each test in a connection-level transaction so that even if the code
+    # under test calls session.commit(), it only commits to a SAVEPOINT inside
+    # the outer transaction.  The outer rollback at the end always cleans up.
+    conn = db_engine.connect()
+    trans = conn.begin()
+    sess = Session(bind=conn, join_transaction_mode="create_savepoint")
+    try:
         yield sess
-        sess.rollback()
+    finally:
+        sess.close()
+        trans.rollback()
+        conn.close()
 
 
 # ── Model fixtures ────────────────────────────────────────────────────────────
