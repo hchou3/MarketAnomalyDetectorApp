@@ -549,6 +549,7 @@ def evaluate_candidate(
     folds: list[FoldSpec],
     ku_mask: np.ndarray,
     X_sample_for_gate: np.ndarray | None = None,
+    _guard: bool = True,
 ) -> CandidateResult:
     """Evaluate one candidate on all dev folds.
 
@@ -579,7 +580,8 @@ def evaluate_candidate(
 
     for fold in folds:
         test_weeks_all = all_weeks[fold.test_lo : fold.test_hi]
-        _guard_dev_only(test_weeks_all)
+        if _guard:
+            _guard_dev_only(test_weeks_all)
 
         X_train_raw = X_all[: fold.val_lo]
         X_val_raw = X_all[fold.val_lo : fold.test_lo]
@@ -1475,6 +1477,7 @@ def _evaluate_vix_baselines(
     folds: list[FoldSpec],
     vix_close: np.ndarray,
     ku_mask: np.ndarray,
+    _guard: bool = True,
 ) -> dict[str, CandidateResult]:
     """Evaluate vix_level and vix_z52 on the same dev folds as candidates.
 
@@ -1492,7 +1495,8 @@ def _evaluate_vix_baselines(
 
     for fold in folds:
         test_weeks = all_weeks[fold.test_lo : fold.test_hi]
-        _guard_dev_only(test_weeks)
+        if _guard:
+            _guard_dev_only(test_weeks)
 
         val_detect = detect_arr[fold.val_lo : fold.test_lo]
         val_ku = ku_mask[fold.val_lo : fold.test_lo]
@@ -1555,10 +1559,11 @@ def _evaluate_vix_baselines(
     level_predict_folds: list[FoldResult] = []
     for fold in folds:
         test_weeks = all_weeks[fold.test_lo : fold.test_hi]
-        try:
-            _guard_dev_only(test_weeks)
-        except ValueError:
-            continue
+        if _guard:
+            try:
+                _guard_dev_only(test_weeks)
+            except ValueError:
+                continue
 
         val_detect = detect_arr[fold.val_lo : fold.test_lo]
         val_ku = ku_mask[fold.val_lo : fold.test_lo]
@@ -1619,6 +1624,7 @@ def _evaluate_old_baselines(
     folds: list[FoldSpec],
     csv_path: Path,
     ku_mask: np.ndarray,
+    _guard: bool = True,
 ) -> dict[str, CandidateResult]:
     """Evaluate old 3-feature IsoForest and old ensemble on the same dev folds.
 
@@ -1646,10 +1652,11 @@ def _evaluate_old_baselines(
     iso_folds: list[FoldResult] = []
     for fold in folds:
         test_weeks = all_weeks[fold.test_lo : fold.test_hi]
-        try:
-            _guard_dev_only(test_weeks)
-        except ValueError:
-            continue
+        if _guard:
+            try:
+                _guard_dev_only(test_weeks)
+            except ValueError:
+                continue
 
         train_weeks_set = set(all_weeks[: fold.val_lo])
         val_weeks_set = set(all_weeks[fold.val_lo : fold.test_lo])
@@ -1711,10 +1718,11 @@ def _evaluate_old_baselines(
 
     for fold in folds:
         test_weeks = all_weeks[fold.test_lo : fold.test_hi]
-        try:
-            _guard_dev_only(test_weeks)
-        except ValueError:
-            continue
+        if _guard:
+            try:
+                _guard_dev_only(test_weeks)
+            except ValueError:
+                continue
 
         train_weeks_set = set(all_weeks[: fold.val_lo])
         val_weeks_set = set(all_weeks[fold.val_lo : fold.test_lo])
