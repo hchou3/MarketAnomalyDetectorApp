@@ -353,7 +353,25 @@ def test_yahoo_is_priority_1_for_fx(registry):
 
 # ── Step 4: auto_adjust enforcement for Yahoo ETFs ────────────────────────────
 
-_YAHOO_ETF_SYMBOLS = {"DBC", "MBB", "MUB", "LQD", "HYG", "EMB", "VGK", "EWJ", "EWZ", "INDA", "MCHI"}
+_YAHOO_ETF_SYMBOLS = {
+    # Original ETFs
+    "DBC",
+    "MBB",
+    "MUB",
+    "LQD",
+    "HYG",
+    "EMB",
+    "VGK",
+    "EWJ",
+    "EWZ",
+    "INDA",
+    "MCHI",
+    # Longer-history proxy ETFs / mutual funds added for backward splicing
+    "VWEHX",  # Vanguard HY Corporate Bond mutual fund (pre-HYG)
+    "IEV",  # iShares Europe ETF (pre-VGK)
+    "EPI",  # WisdomTree India Earnings ETF (pre-INDA)
+    "FXI",  # iShares China Large-Cap ETF (pre-MCHI)
+}
 
 
 def test_yahoo_etf_sources_have_auto_adjust(registry):

@@ -147,6 +147,55 @@ def build(
     return out
 
 
+_SPLICE_FIDELITIES: frozenset[str] = frozenset({"proxy", "exact"})
+
+
+def _splice_providers(
+    provider_dfs: list[tuple[str, str, pd.DataFrame]],
+) -> pd.DataFrame | None:
+    """Combine provider DataFrames, extending coverage backward with earlier secondaries.
+
+    Parameters
+    ----------
+    provider_dfs:
+        ``[(provider, fidelity, df), ...]`` in ascending priority order (priority
+        1 first).  Each *df* must have ``obs_date``, ``value``, ``known_at`` columns.
+
+    Returns
+    -------
+    Combined DataFrame with an additional ``source_provider`` (str) column, or
+    ``None`` when *provider_dfs* is empty.
+
+    The first entry (primary) contributes all its rows.  Each subsequent entry
+    (secondary) adds only the rows that pre-date the current earliest observation
+    in the combined frame, and only when its declared *fidelity* is ``"proxy"``
+    or ``"exact"``.  This chains: the third source can extend before the second,
+    which may itself pre-date the first.
+    """
+    if not provider_dfs:
+        return None
+
+    primary_provider, _, primary_df = provider_dfs[0]
+    combined = primary_df.copy()
+    combined["source_provider"] = primary_provider
+
+    for provider, fidelity, df in provider_dfs[1:]:
+        if fidelity not in _SPLICE_FIDELITIES:
+            continue
+        earliest = combined["obs_date"].min()
+        earlier = df[df["obs_date"] < earliest].copy()
+        if earlier.empty:
+            continue
+        earlier["source_provider"] = provider
+        combined = (
+            pd.concat([earlier, combined], ignore_index=True)
+            .sort_values("obs_date")
+            .reset_index(drop=True)
+        )
+
+    return combined
+
+
 def load_prices(
     session: Session,
     spec: list[FeatureSpec],
@@ -154,15 +203,18 @@ def load_prices(
 ) -> dict[str, pd.DataFrame]:
     """Fetch prices for every instrument referenced by *spec* from the database.
 
-    For each instrument the provider with the lowest priority number (highest
-    priority) that actually has data is used.  ``bloomberg_ews`` is never
-    selected.  If *as_of* is given, rows with ``known_at > as_of`` are excluded.
+    The primary source is the lowest-priority-number provider that has data.
+    Earlier-starting secondary sources whose declared fidelity is ``"proxy"`` or
+    ``"exact"`` are spliced in to extend coverage before the primary's first date.
+    ``bloomberg_ews`` is never selected.  If *as_of* is given, rows with
+    ``known_at > as_of`` are excluded.
 
     Returns
     -------
     dict[str, pd.DataFrame]
         Keys are instrument IDs.  Each DataFrame has float ``value``,
-        date ``obs_date``, and date ``known_at``.
+        date ``obs_date``, date ``known_at``, and str ``source_provider``
+        recording which provider supplied each row.
     """
     from sqlalchemy import select
 
@@ -177,7 +229,7 @@ def load_prices(
     result: dict[str, pd.DataFrame] = {}
     for inst_id in sorted(instrument_ids):
         providers = session.execute(
-            select(SymbolMapRow.provider, SymbolMapRow.priority)
+            select(SymbolMapRow.provider, SymbolMapRow.priority, SymbolMapRow.fidelity)
             .where(
                 SymbolMapRow.instrument_id == inst_id,
                 SymbolMapRow.provider != "bloomberg_ews",
@@ -185,6 +237,7 @@ def load_prices(
             .order_by(SymbolMapRow.priority)
         ).fetchall()
 
+        provider_dfs: list[tuple[str, str, pd.DataFrame]] = []
         for prow in providers:
             q = select(PriceRow.obs_date, PriceRow.value, PriceRow.known_at).where(
                 PriceRow.instrument_id == inst_id,
@@ -196,8 +249,11 @@ def load_prices(
             if rows:
                 df = pd.DataFrame(rows, columns=["obs_date", "value", "known_at"])
                 df["value"] = df["value"].astype(float)
-                result[inst_id] = df
-                break  # highest-priority provider with data wins
+                provider_dfs.append((prow.provider, prow.fidelity, df))
+
+        spliced = _splice_providers(provider_dfs)
+        if spliced is not None:
+            result[inst_id] = spliced
 
     return result
 

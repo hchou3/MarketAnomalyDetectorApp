@@ -76,13 +76,27 @@
       fidelity: proxy
       auto_adjust: true
       notes: Invesco DB Commodity ETF; available from 2006-02-03; tracks similar basket.
+    - provider: yahoo
+      symbol: "^BCOM"
+      priority: 2
+      fidelity: proxy
+      auto_adjust: false
+      source_frequency: daily
+      publication_lag_days: 0
+      notes: >
+        Bloomberg Commodity Index; history from ~1991 per Yahoo records (launched as
+        DJ-AIG Commodity Index in 1998, back-calculated). Different basket from CRY but
+        longest public commodity index with pre-2006 coverage. Verify actual Yahoo start
+        date with mad-data backfill crb_commodity. No distributions; auto_adjust not needed.
     - provider: bloomberg_ews
       symbol: CRY
       priority: 99
       fidelity: exact
   valid_from: null
   valid_to: null
-  notes: CRY (Reuters/Jefferies CRB) is the official index; DBC is the best public proxy.
+  notes: >
+    CRY (Reuters/Jefferies CRB) is the official index; DBC is the best public proxy.
+    ^BCOM extends pre-2006 coverage to ~1991 at the cost of a different commodity basket.
 
 - id: baltic_dry
   name: Baltic Dry Index
@@ -643,6 +657,17 @@
       fidelity: proxy
       auto_adjust: true
       notes: iShares iBoxx $ HY Corp Bond ETF; available from 2007-04-11.
+    - provider: yahoo
+      symbol: VWEHX
+      priority: 2
+      fidelity: proxy
+      auto_adjust: true
+      source_frequency: daily
+      publication_lag_days: 0
+      notes: >
+        Vanguard High-Yield Corporate Bond mutual fund (NAV); history from ~1978.
+        Splice extends coverage before 2007-04-11 when HYG has no data. NAV series;
+        dividend-adjusted via auto_adjust.
     - provider: bloomberg_ews
       symbol: LF98TRUU
       priority: 99
@@ -764,6 +789,24 @@
       fidelity: proxy
       auto_adjust: true
       notes: Vanguard FTSE Europe ETF; available from 2005-03-04.
+    - provider: yahoo
+      symbol: IEV
+      priority: 2
+      fidelity: proxy
+      auto_adjust: true
+      source_frequency: daily
+      publication_lag_days: 0
+      notes: iShares Europe ETF; available from ~2000-07-25. Extends coverage before VGK's 2005 start.
+    - provider: yahoo
+      symbol: "^STOXX50E"
+      priority: 3
+      fidelity: proxy
+      auto_adjust: false
+      source_frequency: daily
+      publication_lag_days: 0
+      notes: >
+        Euro Stoxx 50 index (EUR-denominated, large-cap only); back-calculated to 1986.
+        Currency mismatch vs MSCI Europe (USD) and narrower universe; usable proxy pre-2000.
     - provider: bloomberg_ews
       symbol: MXEU
       priority: 99
@@ -846,6 +889,26 @@
       fidelity: proxy
       auto_adjust: true
       notes: iShares MSCI India ETF; available from 2012-02-09.
+    - provider: yahoo
+      symbol: EPI
+      priority: 2
+      fidelity: proxy
+      auto_adjust: true
+      source_frequency: daily
+      publication_lag_days: 0
+      notes: >
+        WisdomTree India Earnings ETF; available from 2008-02-22. Dividend-weighted
+        basket; extends coverage before INDA's 2012 start.
+    - provider: yahoo
+      symbol: "^BSESN"
+      priority: 3
+      fidelity: proxy
+      auto_adjust: false
+      source_frequency: daily
+      publication_lag_days: 0
+      notes: >
+        Bombay Stock Exchange SENSEX (INR-denominated, 30 large-cap stocks);
+        history from ~1979. Currency mismatch vs MSCI India (USD); usable proxy pre-2008.
     - provider: bloomberg_ews
       symbol: MXIN
       priority: 99
@@ -868,6 +931,24 @@
       fidelity: proxy
       auto_adjust: true
       notes: iShares MSCI China ETF; available from 2011-03-29.
+    - provider: yahoo
+      symbol: FXI
+      priority: 2
+      fidelity: proxy
+      auto_adjust: true
+      source_frequency: daily
+      publication_lag_days: 0
+      notes: iShares China Large-Cap ETF; available from 2004-10-05. Extends coverage before MCHI's 2011 start.
+    - provider: yahoo
+      symbol: "000001.SS"
+      priority: 3
+      fidelity: proxy
+      auto_adjust: false
+      source_frequency: daily
+      publication_lag_days: 0
+      notes: >
+        Shanghai Stock Exchange Composite Index (CNY-denominated); history from 1990.
+        Currency mismatch vs MSCI China (USD) and broader A-share universe; usable proxy pre-2004.
     - provider: bloomberg_ews
       symbol: MXCN
       priority: 99

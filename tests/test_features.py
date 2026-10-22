@@ -722,3 +722,93 @@ def test_weekly_series_gap_returns_nan():
     tues_idx = pd.DatetimeIndex([pd.Timestamp(gap_tuesday)])
     s = _weekly_series(df, tues_idx)
     assert math.isnan(s.iloc[0])
+
+
+# ── Provider splicing ─────────────────────────────────────────────────────────
+
+
+from market_anomaly_detector.features.build import _splice_providers  # noqa: E402
+
+
+def _provider_df(start: date, n_days: int, val_start: float = 100.0) -> pd.DataFrame:
+    """Daily DataFrame with n_days consecutive calendar days starting on start."""
+    obs = [start + timedelta(days=i) for i in range(n_days)]
+    return pd.DataFrame(
+        {
+            "obs_date": obs,
+            "value": [val_start + i * 0.01 for i in range(n_days)],
+            "known_at": obs,
+        }
+    )
+
+
+def test_splice_providers_returns_none_for_empty():
+    assert _splice_providers([]) is None
+
+
+def test_splice_providers_single_provider_adds_source_column():
+    df = _provider_df(date(2020, 1, 1), 30)
+    result = _splice_providers([("yahoo", "proxy", df)])
+    assert result is not None
+    assert "source_provider" in result.columns
+    assert (result["source_provider"] == "yahoo").all()
+    assert len(result) == 30
+
+
+def test_splice_providers_extends_backward_no_overlap():
+    """Secondary rows strictly before primary start are prepended; overlap excluded."""
+    primary = _provider_df(date(2020, 1, 10), 11)  # days 10–20
+    secondary = _provider_df(date(2020, 1, 1), 15)  # days 1–15 (overlap 10–15)
+    result = _splice_providers([("yahoo", "exact", primary), ("fred", "proxy", secondary)])
+    assert result is not None
+    # Secondary contributes days 1–9 (9 rows), primary keeps days 10–20 (11 rows)
+    assert len(result) == 9 + 11
+    sec = result[result["source_provider"] == "fred"]
+    pri = result[result["source_provider"] == "yahoo"]
+    assert len(sec) == 9
+    assert len(pri) == 11
+    assert sec["obs_date"].max() < pri["obs_date"].min()
+
+
+def test_splice_providers_skips_low_fidelity_secondary():
+    """Secondary with fidelity not in {proxy, exact} is never used."""
+    primary = _provider_df(date(2020, 1, 10), 11)
+    secondary = _provider_df(date(2020, 1, 1), 15)
+    result = _splice_providers([("yahoo", "exact", primary), ("fred", "unavailable", secondary)])
+    assert result is not None
+    assert (result["source_provider"] == "yahoo").all()
+    assert len(result) == 11
+
+
+def test_splice_providers_chain_two_secondaries():
+    """Second secondary extends before the first secondary (chain splice)."""
+    primary = _provider_df(date(2020, 6, 1), 30)  # starts Jun 1
+    sec1 = _provider_df(date(2020, 3, 1), 100)  # starts Mar 1
+    sec2 = _provider_df(date(2020, 1, 1), 200)  # starts Jan 1
+    result = _splice_providers(
+        [("yahoo", "exact", primary), ("fred", "proxy", sec1), ("cboe", "proxy", sec2)]
+    )
+    assert result is not None
+    min_by_prov = result.groupby("source_provider")["obs_date"].min()
+    # cboe earliest, fred middle, yahoo latest
+    assert min_by_prov["cboe"] < min_by_prov["fred"] < min_by_prov["yahoo"]
+
+
+def test_splice_providers_noop_when_secondary_does_not_pre_date_primary():
+    """Secondary starting after primary is not spliced; primary unchanged."""
+    primary = _provider_df(date(2020, 1, 1), 30)
+    secondary = _provider_df(date(2020, 1, 15), 30)  # starts after primary
+    result = _splice_providers([("yahoo", "exact", primary), ("fred", "proxy", secondary)])
+    assert result is not None
+    assert (result["source_provider"] == "yahoo").all()
+    assert len(result) == 30
+
+
+def test_splice_providers_sorted_by_obs_date():
+    """Result rows are in ascending obs_date order after splice."""
+    primary = _provider_df(date(2020, 6, 1), 10)
+    secondary = _provider_df(date(2020, 1, 1), 50)
+    result = _splice_providers([("yahoo", "proxy", primary), ("fred", "proxy", secondary)])
+    assert result is not None
+    dates = result["obs_date"].tolist()
+    assert dates == sorted(dates)
