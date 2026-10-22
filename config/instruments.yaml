@@ -26,8 +26,10 @@
     - provider: yahoo
       symbol: "GC=F"
       priority: 1
-      fidelity: proxy
-      notes: Front-month gold futures; tracks spot within ~$5 but is not spot.
+      fidelity: exact
+      notes: >
+        Front-month gold futures; tracks spot within ~$5. Weekly-change corr
+        vs EWS XAU BGNL = 0.986 (1077 weeks), above the 0.98 exact threshold.
     - provider: bloomberg_ews
       symbol: "XAU BGNL"
       priority: 99
@@ -162,7 +164,7 @@
     - provider: yahoo
       symbol: "JPY=X"
       priority: 1
-      fidelity: exact
+      fidelity: proxy
     - provider: fred
       symbol: DEXJPUS
       priority: 2
@@ -179,7 +181,10 @@
       fidelity: exact
   valid_from: null
   valid_to: null
-  notes: ""
+  notes: >
+    fidelity-override: Yahoo WM/Reuters 4 pm London fix may misalign with
+    EWS JPY snapshot; baseline corr 0.883 (proxy-level). Timing-diagnostic
+    under investigation; see docs/reports/timing-diagnostic.md.
 
 - id: gbp_usd
   name: British pound / US dollar
@@ -192,7 +197,7 @@
     - provider: yahoo
       symbol: "GBPUSD=X"
       priority: 1
-      fidelity: exact
+      fidelity: proxy
     - provider: fred
       symbol: DEXUSUK
       priority: 2
@@ -207,7 +212,10 @@
       fidelity: exact
   valid_from: null
   valid_to: null
-  notes: ""
+  notes: >
+    fidelity-override: Yahoo WM/Reuters 4 pm London fix may misalign with
+    EWS GBP snapshot; baseline corr 0.889 (proxy-level). Timing-diagnostic
+    under investigation; see docs/reports/timing-diagnostic.md.
 
 - id: gbp_usd_fred
   name: GBP/USD history proxy — FRED DEXUSUK
@@ -331,8 +339,11 @@
     - provider: fred
       symbol: DGS2
       priority: 1
-      fidelity: exact
+      fidelity: proxy
       publication_lag_days: 1
+      notes: >
+        Weekly-change corr vs EWS USGG2YR = 0.976 (1111 weeks). Below the
+        0.98 exact threshold; classified proxy.
     - provider: bloomberg_ews
       symbol: USGG2YR
       priority: 99
@@ -352,8 +363,11 @@
     - provider: fred
       symbol: DGS3MO
       priority: 1
-      fidelity: exact
+      fidelity: proxy
       publication_lag_days: 1
+      notes: >
+        Weekly-change corr vs EWS USGG3M = 0.971 (1111 weeks). Below the
+        0.98 exact threshold; classified proxy.
     - provider: yahoo
       symbol: "^IRX"
       priority: 2
@@ -421,7 +435,10 @@
       fidelity: exact
   valid_from: null
   valid_to: null
-  notes: No public daily source; FRED monthly OECD series is the best available.
+  notes: >
+    fidelity-override: monthly source, not used for weekly features.
+    FRED monthly OECD series is the best available daily substitute;
+    monthly corr vs EWS GTDEM10Y = 0.983.
 
 - id: de_2y_yield
   name: Germany 2-year government bond yield
@@ -492,7 +509,10 @@
       fidelity: exact
   valid_from: null
   valid_to: null
-  notes: ""
+  notes: >
+    Monthly source; not used for weekly features. Monthly corr vs EWS
+    GTITL10YR = 0.977. OECD monthly series is the best available public
+    source for the BTP.
 
 - id: it_2y_yield
   name: Italy 2-year government bond yield
@@ -549,7 +569,10 @@
       fidelity: exact
   valid_from: null
   valid_to: null
-  notes: ""
+  notes: >
+    fidelity-override: monthly source, not used for weekly features.
+    Monthly corr vs EWS GTJPY10YR = 0.718 (256 months); low correlation
+    reflects OECD smoothing artefacts at monthly frequency.
 
 - id: jp_2y_yield
   name: Japan 2-year government bond yield (JGB)
@@ -726,10 +749,13 @@
       notes: >
         Vanguard High-Yield Corporate Bond mutual fund (NAV); history from ~1978.
         Extends coverage before HYG's 2007 start. NAV series; dividend-adjusted via
-        auto_adjust.
+        auto_adjust. Weekly-change corr vs EWS LF98TRUU = 0.905 (1111 weeks);
+        preferred long-history proxy (HYG corr 0.825, 732 weeks).
   valid_from: null
   valid_to: null
-  notes: Proxy for us_hy_corp_tr. Use as fallback_instrument_id in FeatureSpec.
+  notes: >
+    Proxy for us_hy_corp_tr; preferred long-history source (corr 0.905 vs EWS
+    LF98TRUU). Use as fallback_instrument_id in FeatureSpec.
 
 - id: global_hy_tr
   name: Bloomberg Global High-Yield Total Return Index (candidate)
@@ -820,8 +846,10 @@
     - provider: yahoo
       symbol: "^GSPC"
       priority: 1
-      fidelity: proxy
-      notes: S&P 500 is a close proxy for MSCI USA.
+      fidelity: exact
+      notes: >
+        S&P 500; weekly-change corr vs EWS MXUS = 0.999 (1111 weeks),
+        above the 0.98 exact threshold.
     - provider: bloomberg_ews
       symbol: MXUS
       priority: 99
@@ -868,10 +896,15 @@
       auto_adjust: true
       source_frequency: daily
       publication_lag_days: 0
-      notes: iShares Europe ETF; available from ~2000-07-25. Extends coverage before VGK's 2005 start.
+      notes: >
+        iShares Europe ETF; available from ~2000-07-25. Extends coverage before
+        VGK's 2005 start. Weekly-change corr vs EWS MXEU = 0.834 (1082 weeks).
+        Pre-2007 history fallback (after 2007 use msci_europe_stoxx50).
   valid_from: null
   valid_to: null
-  notes: Proxy for msci_europe. Use as fallback_instrument_id in FeatureSpec.
+  notes: >
+    Proxy for msci_europe; pre-2007 history fallback (corr 0.834 vs EWS MXEU).
+    Use as fallback_instrument_id in FeatureSpec for pre-2007 coverage.
 
 - id: msci_europe_stoxx50
   name: MSCI Europe proxy — Euro Stoxx 50 Index (^STOXX50E)
@@ -892,10 +925,14 @@
       notes: >
         Euro Stoxx 50 index (EUR-denominated, large-cap eurozone only); back-calculated
         to 1986. Currency mismatch vs MSCI Europe (USD) and narrower universe; usable
-        proxy pre-2000.
+        proxy pre-2000. Weekly-change corr vs EWS MXEU = 0.961 (734 weeks);
+        preferred Europe proxy (VGK corr 0.841, IEV corr 0.834).
   valid_from: null
   valid_to: null
-  notes: Proxy for msci_europe. Use as fallback_instrument_id in FeatureSpec.
+  notes: >
+    Proxy for msci_europe; preferred long-history source (corr 0.961 vs EWS MXEU).
+    Use as primary fallback_instrument_id in FeatureSpec; combine with
+    msci_europe_iev for pre-2007 coverage.
 
 - id: msci_japan
   name: MSCI Japan Index
@@ -910,14 +947,49 @@
       priority: 1
       fidelity: proxy
       auto_adjust: true
-      notes: iShares MSCI Japan ETF.
+      notes: >
+        iShares MSCI Japan ETF. Weekly-change corr vs EWS MXJP = 0.787
+        (1111 weeks); below the 0.80 proxy threshold, likely a timing
+        misalignment between US-hours EWJ close and EWS MXJP snapshot.
+        Timing-diagnostic under investigation with msci_japan_n225.
     - provider: bloomberg_ews
       symbol: MXJP
       priority: 99
       fidelity: exact
   valid_from: null
   valid_to: null
-  notes: ""
+  notes: >
+    fidelity-override: EWJ US-hours vs EWS MXJP timing under investigation;
+    baseline corr 0.787 below proxy threshold. See timing-diagnostic report.
+
+- id: msci_japan_n225
+  name: MSCI Japan proxy — Nikkei 225 Index (^N225)
+  reference_instrument: msci_japan
+  asset_class: equity_index
+  groups: [equity_index]
+  units: index_points
+  quote: Index level in JPY (225 large-cap stocks, price-weighted)
+  native_frequency: daily
+  sources:
+    - provider: yahoo
+      symbol: "^N225"
+      priority: 1
+      fidelity: proxy
+      auto_adjust: false
+      source_frequency: daily
+      publication_lag_days: 0
+      notes: >
+        Nikkei 225 (JPY-denominated, price-weighted); history from ~1965.
+        Currency mismatch vs MSCI Japan (USD) and different construction
+        (price-weighted vs float-adjusted market-cap). Included for
+        timing-diagnostic: N225 trades Tokyo hours (JST) vs EWJ (US close),
+        so obs_date shift pattern may differ. See timing-diagnostic report.
+  valid_from: null
+  valid_to: null
+  notes: >
+    Proxy for msci_japan. Timing-diagnostic candidate: ^N225 local-currency
+    data may align more naturally with EWS MXJP Wednesday snapshot than
+    EWJ (US close). Evaluate before adding to FeatureSpec fallback_instrument_ids.
 
 - id: msci_brazil
   name: MSCI Brazil Index
@@ -1019,9 +1091,13 @@
       notes: >
         Bombay Stock Exchange SENSEX (INR-denominated, 30 large-cap stocks); history
         from ~1979. Currency mismatch vs MSCI India (USD); usable proxy pre-2008.
+        Weekly-change corr vs EWS MXIN = 0.975 (1111 weeks), preferred India proxy
+        (INDA corr 0.904, EPI corr 0.888).
   valid_from: null
   valid_to: null
-  notes: Proxy for msci_india. Use as fallback_instrument_id in FeatureSpec.
+  notes: >
+    Proxy for msci_india; preferred long-history source (corr 0.975 vs EWS MXIN).
+    Use as fallback_instrument_id in FeatureSpec.
 
 - id: msci_china
   name: MSCI China Index
@@ -1074,6 +1150,7 @@
   units: index_points
   quote: Index level in CNY (A-shares)
   native_frequency: daily
+  active: false
   sources:
     - provider: yahoo
       symbol: "000001.SS"
@@ -1084,11 +1161,14 @@
       publication_lag_days: 0
       notes: >
         Shanghai Stock Exchange Composite Index (CNY-denominated); history from 1990.
-        Currency mismatch vs MSCI China (USD) and broader A-share universe; usable
-        proxy pre-2004.
+        Weekly-change corr vs EWS MXCN = 0.458 (1086 weeks); different market
+        (CNY A-shares vs USD MXCN). Inactive: not suitable as a proxy.
   valid_from: null
   valid_to: null
-  notes: Proxy for msci_china. Use as fallback_instrument_id in FeatureSpec.
+  notes: >
+    Inactive: corr 0.458 vs EWS MXCN is below the 0.80 proxy threshold.
+    SSE Composite (CNY A-shares) tracks a structurally different market
+    from MSCI China (USD H-shares + ADRs). Do not use as fallback.
 
 # ── Macro index ────────────────────────────────────────────────────────────────
 

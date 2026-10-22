@@ -382,6 +382,41 @@ def test_find_gaps_just_over_boundary():
     assert gaps[0].bdays == 6
 
 
+def test_find_gaps_monthly_consecutive_months_not_flagged():
+    """Consecutive monthly observations (28–31 days apart) must not be gaps."""
+    months = [
+        date(2024, 1, 31),
+        date(2024, 2, 29),
+        date(2024, 3, 31),
+        date(2024, 4, 30),
+    ]
+    assert not find_gaps(months, source_frequency="monthly")
+
+
+def test_find_gaps_monthly_skipped_month_flagged():
+    """A skipped month (> 32 calendar days) must be flagged."""
+    d1 = date(2024, 1, 31)
+    d2 = date(2024, 3, 31)  # 60 days — one month skipped
+    gaps = find_gaps([d1, d2], source_frequency="monthly")
+    assert len(gaps) == 1
+    assert gaps[0].start == d1
+    assert gaps[0].end == d2
+
+
+def test_find_gaps_weekly_no_gap():
+    """Consecutive weekly observations (7 days apart) must not be flagged."""
+    dates = [date(2024, 1, 2) + timedelta(weeks=i) for i in range(5)]
+    assert not find_gaps(dates, source_frequency="weekly")
+
+
+def test_find_gaps_weekly_skipped_week_flagged():
+    """A skipped week (> 12 calendar days) must be flagged."""
+    d1 = date(2024, 1, 2)
+    d2 = date(2024, 1, 16)  # 14 days — one week skipped
+    gaps = find_gaps([d1, d2], source_frequency="weekly")
+    assert len(gaps) == 1
+
+
 # ── compare_fidelity: tolerance prevents gap bridging ────────────────────────
 
 

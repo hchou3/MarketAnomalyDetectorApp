@@ -541,6 +541,53 @@ def _cmd_report(args: argparse.Namespace) -> int:
     return 0
 
 
+# ── timing-diagnostic ─────────────────────────────────────────────────────────
+
+_TIMING_INSTRUMENT_IDS = [
+    "gbp_usd",
+    "usd_jpy",
+    "gbp_usd_fred",
+    "msci_japan",
+    "msci_japan_n225",
+]
+
+
+def _cmd_timing_diagnostic(args: argparse.Namespace) -> int:
+    from pathlib import Path
+
+    from sqlalchemy.orm import Session
+
+    from .db.engine import create_engine
+    from .paths import REPO_ROOT
+    from .timing import compute_timing_diagnostic, write_timing_report
+
+    instrument_ids = args.instruments if args.instruments else _TIMING_INSTRUMENT_IDS
+    out_path = (
+        Path(args.output)
+        if args.output
+        else REPO_ROOT / "docs" / "reports" / f"{args.date}-timing-diagnostic.md"
+    )
+
+    try:
+        engine = create_engine(url=args.database_url)
+        with Session(engine) as session:
+            _require_db_ready(engine)
+            results = compute_timing_diagnostic(session, instrument_ids)
+    except Exception as exc:
+        print(f"ERROR: database error: {exc}", file=sys.stderr)
+        return 1
+
+    try:
+        write_timing_report(results, out_path)
+    except Exception as exc:
+        print(f"ERROR: writing report: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"timing-diagnostic: {len(results)} instrument(s) analysed.")
+    print(f"  {out_path}")
+    return 0
+
+
 # ── parity-stress ─────────────────────────────────────────────────────────────
 
 _DEFAULT_STRESS_CSV = Path(__file__).parent.parent.parent / "data" / "raw" / "stress_extra.csv"
@@ -668,7 +715,43 @@ def main() -> None:
     )
     p.add_argument("--database-url", default=None, metavar="URL")
 
+    # ── timing-diagnostic ─────────────────────────────────────────────────────
+    p = subparsers.add_parser(
+        "timing-diagnostic",
+        help="Compute obs_date-shift correlation table for FX/equity instruments.",
+    )
+    p.add_argument(
+        "--instruments",
+        nargs="+",
+        default=None,
+        metavar="ID",
+        help=(
+            "Instrument IDs to analyse (default: gbp_usd usd_jpy gbp_usd_fred"
+            " msci_japan msci_japan_n225)."
+        ),
+    )
+    p.add_argument(
+        "--output",
+        default=None,
+        metavar="PATH",
+        help="Output markdown path (default: docs/reports/<date>-timing-diagnostic.md).",
+    )
+    p.add_argument(
+        "--date",
+        default=None,
+        metavar="YYYY-MM-DD",
+        help="Date prefix for the default output filename (default: today).",
+    )
+    p.add_argument("--database-url", default=None, metavar="URL")
+
     args = parser.parse_args()
+
+    # Resolve timing-diagnostic default date now that args are parsed
+    if args.command == "timing-diagnostic" and args.date is None:
+        from datetime import date as _date
+
+        args.date = str(_date.today())
+
     if args.command == "sync-registry":
         sys.exit(_cmd_sync_registry(args))
     elif args.command == "load-ews":
@@ -683,6 +766,8 @@ def main() -> None:
         sys.exit(_cmd_parity_stress(args))
     elif args.command == "report":
         sys.exit(_cmd_report(args))
+    elif args.command == "timing-diagnostic":
+        sys.exit(_cmd_timing_diagnostic(args))
     else:
         parser.print_help()
         sys.exit(1)
