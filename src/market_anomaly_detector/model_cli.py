@@ -822,6 +822,36 @@ def _cmd_confirm(args: argparse.Namespace) -> int:
         return 1
 
 
+# ── explain-cases ─────────────────────────────────────────────────────────────
+
+
+def _cmd_explain_cases(args: argparse.Namespace) -> int:
+    from pathlib import Path
+
+    from sqlalchemy.orm import Session
+
+    from .db.engine import create_engine
+    from .explain_v2 import run_explain_cases
+
+    out_dir = Path(args.out_dir) if args.out_dir else _REPORTS_DIR
+
+    try:
+        engine = create_engine(url=args.database_url)
+        with Session(engine) as session:
+            _require_db_ready(engine)
+            return run_explain_cases(
+                session=session,
+                out_dir=out_dir,
+                label_set=args.label_set,
+                csv_path=args.csv,
+            )
+    except SystemExit:
+        raise
+    except Exception as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+
+
 # ── main ──────────────────────────────────────────────────────────────────────
 
 
@@ -1106,6 +1136,30 @@ def main() -> None:
         help="Reason for --force override (required when --force is set).",
     )
 
+    # ── explain-cases ─────────────────────────────────────────────────────────
+    pex = subparsers.add_parser(
+        "explain-cases",
+        help=(
+            "Run SHAP explanations on 4 stress-episode case studies and write "
+            "docs/reports/<date>-explanations.md. Rebuilds each fold model to verify "
+            "probabilities match committed CSVs within 1e-9."
+        ),
+    )
+    pex.add_argument("--label-set", default="ews_v1", metavar="NAME")
+    pex.add_argument("--database-url", default=None, metavar="URL")
+    pex.add_argument(
+        "--csv",
+        default=None,
+        metavar="PATH",
+        help="Path to confirm_predictions.csv for verification (default: artifacts/).",
+    )
+    pex.add_argument(
+        "--out-dir",
+        default=None,
+        metavar="DIR",
+        help="Directory to write the report (default: docs/reports/).",
+    )
+
     args = parser.parse_args()
     if args.command == "episodes":
         sys.exit(_cmd_episodes(args))
@@ -1121,6 +1175,8 @@ def main() -> None:
         sys.exit(_cmd_select(args))
     elif args.command == "confirm":
         sys.exit(_cmd_confirm(args))
+    elif args.command == "explain-cases":
+        sys.exit(_cmd_explain_cases(args))
     else:
         parser.print_help()
         sys.exit(1)
