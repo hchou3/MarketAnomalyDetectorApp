@@ -1341,7 +1341,7 @@ def run_selection(
         last_test_year,
         n_boot=n_boot,
     )
-    print(f"model-selection: {selected_name or 'none'} → {out_path}")
+    print(f"model-selection: {selected_name or 'none'} -> {out_path}")
     return 0
 
 
@@ -2083,5 +2083,5 @@ def run_calibration_diagnostic(
     today = date.today().isoformat()
     out_path = out_dir / f"{today}-calibration-diagnostic.md"
     write_calibration_diagnostic(out_path, diag_rows, old_ens_native_far_rows)
-    print(f"calibration-diagnostic → {out_path}")
+    print(f"calibration-diagnostic -> {out_path}")
     return 0

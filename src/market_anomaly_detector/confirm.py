@@ -747,7 +747,7 @@ def run_confirm(
         n_boot=0 if skip_bootstrap else n_boot,
         label_set=label_set,
     )
-    print(f"confirm: → {out_path}")
+    print(f"confirm: -> {out_path}")
 
     # ── Export predictions CSV ────────────────────────────────────────────────
     artifacts_dir = out_dir.parent.parent / "artifacts"
@@ -758,7 +758,7 @@ def run_confirm(
         )
         confirm_csv.parent.mkdir(parents=True, exist_ok=True)
         confirm_df.to_csv(confirm_csv, index=False)
-        print(f"confirm: predictions → {confirm_csv}")
+        print(f"confirm: predictions -> {confirm_csv}")
     except Exception as exc:
         print(f"confirm: WARNING predictions export failed: {exc}")
 

@@ -759,7 +759,7 @@ def run_hgb_experiments(
         first_test_year,
         last_test_year,
     )
-    print(f"hgb-experiments: report → {out_path}")
+    print(f"hgb-experiments: report -> {out_path}")
     return 0
 
 
@@ -863,6 +863,6 @@ def run_export_hgb_variant(
     n_alerts = int((df[f"{variant_name}_alert"] == 1).sum())
     print(
         f"export-dev-predictions: {len(df)} dev weeks"
-        f" | {variant_name} alerts={n_alerts} → {out_path}"
+        f" | {variant_name} alerts={n_alerts} -> {out_path}"
     )
     return 0
