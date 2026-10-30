@@ -11,6 +11,7 @@ from sqlalchemy import (
     Boolean,
     Date,
     DateTime,
+    Float,
     ForeignKey,
     Integer,
     Numeric,
@@ -149,3 +150,43 @@ class DataQualityFlagRow(Base):
     obs_date: Mapped[date] = mapped_column(Date)
     rule: Mapped[str] = mapped_column(String(64))
     detail: Mapped[str] = mapped_column(Text)
+
+
+class ModelVersionRow(Base):
+    __tablename__ = "model_versions"
+
+    version: Mapped[str] = mapped_column(String(128), primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    label_set: Mapped[str] = mapped_column(String(64))
+    spec_hash: Mapped[str] = mapped_column(String(64))
+    config_hash: Mapped[str] = mapped_column(String(64))
+    heads: Mapped[str] = mapped_column(Text)
+    metrics: Mapped[str] = mapped_column(Text)
+    threshold: Mapped[float] = mapped_column(Float)
+    platt_a: Mapped[float] = mapped_column(Float)
+    platt_b: Mapped[float] = mapped_column(Float)
+    artifact_path: Mapped[str] = mapped_column(Text)
+    active: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    scores: Mapped[list["RegimeScoreRow"]] = relationship(
+        back_populates="model", cascade="all, delete-orphan"
+    )
+
+
+class RegimeScoreRow(Base):
+    __tablename__ = "regime_scores"
+    __table_args__ = (UniqueConstraint("week", "model_version", "head"),)
+
+    week: Mapped[date] = mapped_column(Date, primary_key=True)
+    model_version: Mapped[str] = mapped_column(
+        String(128), ForeignKey("model_versions.version"), primary_key=True
+    )
+    head: Mapped[str] = mapped_column(String(16), primary_key=True)
+    probability: Mapped[float] = mapped_column(Float)
+    alert: Mapped[bool] = mapped_column(Boolean)
+    threshold: Mapped[float] = mapped_column(Float)
+    status: Mapped[str] = mapped_column(String(32))
+    top_features: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+    model: Mapped[ModelVersionRow] = relationship(back_populates="scores")
