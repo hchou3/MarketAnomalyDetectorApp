@@ -175,7 +175,6 @@ class ModelVersionRow(Base):
 
 class RegimeScoreRow(Base):
     __tablename__ = "regime_scores"
-    __table_args__ = (UniqueConstraint("week", "model_version", "head"),)
 
     week: Mapped[date] = mapped_column(Date, primary_key=True)
     model_version: Mapped[str] = mapped_column(

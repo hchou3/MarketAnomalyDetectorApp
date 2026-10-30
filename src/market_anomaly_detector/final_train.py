@@ -314,13 +314,13 @@ def _fit_final_model(
         "confirm_metrics": _FINAL_CONFIRM_METRICS,
         "heads": {
             "detect": {
-                "status": "active",
+                "role": "serving",
                 "platt_a": platt_detect.a,
                 "platt_b": platt_detect.b,
                 "threshold": thr_detect,
             },
             "predict": {
-                "status": "experimental",
+                "role": "experimental",
                 "platt_a": platt_predict.a,
                 "platt_b": platt_predict.b,
                 "threshold": thr_predict,

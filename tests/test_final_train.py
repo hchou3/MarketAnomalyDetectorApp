@@ -184,8 +184,8 @@ def test_metadata_has_required_fields(tmp_path):
 
     heads = meta["heads"]
     assert "detect" in heads and "predict" in heads
-    assert heads["detect"]["status"] == "active"
-    assert heads["predict"]["status"] == "experimental"
+    assert heads["detect"]["role"] == "serving"
+    assert heads["predict"]["role"] == "experimental"
 
     assert (artifact_dir / "model.joblib").exists()
     assert (artifact_dir / "model.onnx").exists()
