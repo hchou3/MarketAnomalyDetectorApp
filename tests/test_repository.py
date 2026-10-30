@@ -763,7 +763,7 @@ def test_migration_is_at_head(db_engine):
         ctx = MigrationContext.configure(conn)
         heads = ctx.get_current_heads()
 
-    assert "b2c3d4e5f6a7" in heads, f"Expected revision b2c3d4e5f6a7 in heads, got {heads!r}"
+    assert "c3d4e5f6a7b8" in heads, f"Expected revision c3d4e5f6a7b8 in heads, got {heads!r}"
 
 
 @pytest.mark.db
@@ -806,8 +806,8 @@ def test_migration_b2c3_downgrade_upgrade(db_engine):
     alembic_cfg = _AlembicConfig(str(REPO_ROOT / "alembic.ini"))
     alembic_cfg.attributes["database_url"] = url
 
-    # ── downgrade one step ────────────────────────────────────────────────────
-    _alembic_command.downgrade(alembic_cfg, "-1")
+    # ── downgrade to the revision before b2c3 ────────────────────────────────
+    _alembic_command.downgrade(alembic_cfg, "a1b2c3d4e5f6")
 
     insp = _sa.inspect(db_engine)
     assert not insp.has_table("data_quality_flags"), "data_quality_flags must be dropped"
@@ -828,6 +828,45 @@ def test_migration_b2c3_downgrade_upgrade(db_engine):
     col_names2 = {c["name"] for c in insp2.get_columns("ingestion_run_items")}
     assert "rows_new" in col_names2
     assert "rows_revised" in col_names2
+
+
+@pytest.mark.db
+def test_migration_c3d4_downgrade_upgrade(db_engine):
+    """The c3d4e5f6a7b8 migration can be downgraded and re-upgraded cleanly."""
+    import sqlalchemy as _sa
+    from alembic.config import Config as _AlembicConfig
+    from alembic.runtime.migration import MigrationContext
+
+    from alembic import command as _alembic_command
+    from market_anomaly_detector.paths import REPO_ROOT
+
+    url = db_engine.url.render_as_string(hide_password=False)
+    alembic_cfg = _AlembicConfig(str(REPO_ROOT / "alembic.ini"))
+    alembic_cfg.attributes["database_url"] = url
+
+    # ── downgrade one step (c3d4 → b2c3) ─────────────────────────────────────
+    _alembic_command.downgrade(alembic_cfg, "b2c3d4e5f6a7")
+
+    insp = _sa.inspect(db_engine)
+    assert not insp.has_table("model_versions"), "model_versions must be dropped"
+    assert not insp.has_table("regime_scores"), "regime_scores must be dropped"
+
+    with db_engine.connect() as conn:
+        ctx = MigrationContext.configure(conn)
+        mid_heads = ctx.get_current_heads()
+    assert "b2c3d4e5f6a7" in mid_heads
+
+    # ── re-upgrade to head ────────────────────────────────────────────────────
+    _alembic_command.upgrade(alembic_cfg, "head")
+
+    insp2 = _sa.inspect(db_engine)
+    assert insp2.has_table("model_versions"), "model_versions must be recreated"
+    assert insp2.has_table("regime_scores"), "regime_scores must be recreated"
+
+    with db_engine.connect() as conn2:
+        ctx2 = MigrationContext.configure(conn2)
+        final_heads = ctx2.get_current_heads()
+    assert "c3d4e5f6a7b8" in final_heads
 
 
 # ── write_quality_flags ───────────────────────────────────────────────────────

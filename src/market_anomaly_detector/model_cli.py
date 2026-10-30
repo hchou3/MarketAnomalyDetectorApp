@@ -822,6 +822,73 @@ def _cmd_confirm(args: argparse.Namespace) -> int:
         return 1
 
 
+# ── train ─────────────────────────────────────────────────────────────────────
+
+
+def _cmd_train(args: argparse.Namespace) -> int:
+    from pathlib import Path
+
+    from sqlalchemy.orm import Session
+
+    from .db.engine import create_engine
+    from .final_train import ARTIFACTS_ROOT, run_final_train
+
+    out_dir = Path(args.out_dir) if args.out_dir else ARTIFACTS_ROOT
+
+    try:
+        engine = create_engine(url=args.database_url)
+        with Session(engine) as session:
+            _require_db_ready(engine)
+            return run_final_train(
+                session=session,
+                out_dir=out_dir,
+                label_set=args.label_set,
+            )
+    except SystemExit:
+        raise
+    except Exception as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+
+
+# ── export ────────────────────────────────────────────────────────────────────
+
+
+def _cmd_export(args: argparse.Namespace) -> int:
+    from pathlib import Path
+
+    from .final_train import ARTIFACTS_ROOT, run_export
+
+    root = Path(args.artifacts_root) if args.artifacts_root else ARTIFACTS_ROOT
+
+    return run_export(version=args.version, artifacts_root=root)
+
+
+# ── activate ──────────────────────────────────────────────────────────────────
+
+
+def _cmd_activate(args: argparse.Namespace) -> int:
+    from sqlalchemy.orm import Session
+
+    from .db.engine import create_engine
+    from .final_train import run_activate
+
+    try:
+        engine = create_engine(url=args.database_url)
+        with Session(engine) as session:
+            _require_db_ready(engine)
+            return run_activate(
+                version=args.version,
+                head=args.head,
+                session=session,
+            )
+    except SystemExit:
+        raise
+    except Exception as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+
+
 # ── explain-cases ─────────────────────────────────────────────────────────────
 
 
@@ -1136,6 +1203,64 @@ def main() -> None:
         help="Reason for --force override (required when --force is set).",
     )
 
+    # ── train ────────────────────────────────────────────────────────────────
+    ptr = subparsers.add_parser(
+        "train",
+        help=(
+            "Fit the final production model (--final required). "
+            "Writes artifact set to artifacts/<model_version>/ and registers "
+            "an inactive row in model_versions."
+        ),
+    )
+    ptr.add_argument(
+        "--final",
+        action="store_true",
+        required=True,
+        help="Fit the final production model (must be set explicitly).",
+    )
+    ptr.add_argument("--label-set", default="ews_v1", metavar="NAME")
+    ptr.add_argument("--database-url", default=None, metavar="URL")
+    ptr.add_argument(
+        "--out-dir",
+        default=None,
+        metavar="DIR",
+        help="Root directory for artifacts (default: artifacts/).",
+    )
+
+    # ── export ───────────────────────────────────────────────────────────────
+    pxp = subparsers.add_parser(
+        "export",
+        help=(
+            "Re-export ONNX from an existing version's joblib artifact and "
+            "update metadata.json. Refuses if parity > 1e-5."
+        ),
+    )
+    pxp.add_argument("version", metavar="VERSION", help="Model version string.")
+    pxp.add_argument(
+        "--artifacts-root",
+        default=None,
+        metavar="DIR",
+        help="Root directory for artifacts (default: artifacts/).",
+    )
+
+    # ── activate ─────────────────────────────────────────────────────────────
+    pac = subparsers.add_parser(
+        "activate",
+        help=(
+            "Mark a model version active in the model_versions table. "
+            "Only 'detect' head can be activated in v1; predict head is "
+            "permanently experimental."
+        ),
+    )
+    pac.add_argument("version", metavar="VERSION", help="Model version string.")
+    pac.add_argument(
+        "--head",
+        default="detect",
+        metavar="HEAD",
+        help="Head to activate (default: detect).",
+    )
+    pac.add_argument("--database-url", default=None, metavar="URL")
+
     # ── explain-cases ─────────────────────────────────────────────────────────
     pex = subparsers.add_parser(
         "explain-cases",
@@ -1177,6 +1302,12 @@ def main() -> None:
         sys.exit(_cmd_confirm(args))
     elif args.command == "explain-cases":
         sys.exit(_cmd_explain_cases(args))
+    elif args.command == "train":
+        sys.exit(_cmd_train(args))
+    elif args.command == "export":
+        sys.exit(_cmd_export(args))
+    elif args.command == "activate":
+        sys.exit(_cmd_activate(args))
     else:
         parser.print_help()
         sys.exit(1)
