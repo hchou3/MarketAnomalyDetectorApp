@@ -34,6 +34,27 @@ mad-backtest
 ruff check . && ruff format --check .
 ```
 
+## DB test safety
+
+**Never point `MAD_TEST_DATABASE_URL` at the app database.**
+The `pytest -m db` suite calls `Base.metadata.drop_all` during teardown and will
+wipe every table.  Three independent guards refuse to run if the URL is unsafe:
+
+1. The parsed database name in `MAD_TEST_DATABASE_URL` must differ from the one
+   in `MAD_DATABASE_URL` (host aliases, driver prefixes, and URL options cannot
+   bypass this).
+2. The test database name must end with `_test`
+   (e.g. `mad_test`, not `mad`, `staging`, or `prod`).
+3. Immediately before any `DROP`, the fixture queries `current_database()` and
+   aborts if the live database does not end with `_test`.
+
+Run DB tests like this:
+```bash
+docker compose up -d db
+MAD_TEST_DATABASE_URL=postgresql+psycopg://mad:mad@localhost:5432/mad_test \
+    pytest -m db -v
+```
+
 ## Commit rules
 
 - Do not add Co-Authored-By or other attribution lines to commits.

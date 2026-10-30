@@ -5,6 +5,7 @@ import os
 import pytest
 import sqlalchemy as sa
 from alembic.config import Config as AlembicConfig
+from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session
 
 from alembic import command as alembic_command
@@ -25,6 +26,58 @@ def pytest_collection_modifyitems(items):
             item.add_marker(skip)
 
 
+# ── DB safety guards ─────────────────────────────────────────────────────────
+#
+# These functions are module-level so tests/test_db_guard.py can import and
+# unit-test them without spinning up a real database.
+
+
+def _db_name(url_str: str) -> str:
+    """Return the database name component of a SQLAlchemy URL string."""
+    return make_url(url_str).database or ""
+
+
+def _check_test_url(test_url: str, prod_url: str) -> None:
+    """Fail loudly if test_url is unsafe for destructive DB tests.
+
+    Two independent checks:
+    1. The parsed database names must differ (guards against host/driver tricks).
+    2. The test database name must end with '_test'.
+    """
+    test_db = _db_name(test_url)
+    prod_db = _db_name(prod_url)
+
+    if test_db.lower() == prod_db.lower():
+        pytest.fail(
+            f"MAD_TEST_DATABASE_URL database name ({test_db!r}) matches the app "
+            f"database name ({prod_db!r}) — refusing destructive DB tests. "
+            "Point MAD_TEST_DATABASE_URL at a separate *_test database."
+        )
+
+    if not test_db.lower().endswith("_test"):
+        pytest.fail(
+            f"MAD_TEST_DATABASE_URL database name ({test_db!r}) does not end "
+            "with '_test' — refusing destructive DB tests to prevent accidental "
+            "data loss. Rename your test database to end with '_test'."
+        )
+
+
+def _check_live_db(engine: sa.Engine) -> None:
+    """Raise RuntimeError if the live connection's database doesn't end with '_test'.
+
+    Called immediately before any DROP in the teardown path so that even if
+    the engine was somehow swapped after setup, no destructive DDL runs.
+    """
+    with engine.connect() as conn:
+        live_db: str = conn.execute(sa.text("SELECT current_database()")).scalar() or ""
+    if not live_db.lower().endswith("_test"):
+        raise RuntimeError(
+            f"Live database ({live_db!r}) does not end with '_test' — "
+            "refusing drop_all to prevent data loss. "
+            "This is a last-resort safety check; do not bypass it."
+        )
+
+
 # ── Database fixtures (require MAD_TEST_DATABASE_URL) ────────────────────────
 #
 # Run instructions:
@@ -32,8 +85,12 @@ def pytest_collection_modifyitems(items):
 #   MAD_TEST_DATABASE_URL=postgresql+psycopg://mad:mad@localhost:5432/mad_test \
 #       pytest -m db -v
 #
-# MAD_TEST_DATABASE_URL must point to a *separate* database (mad_test, not mad).
-# The fixture refuses to run if both env vars are set and point to the same URL.
+# Rules enforced:
+#   • MAD_TEST_DATABASE_URL must be set; tests skip otherwise.
+#   • The parsed test database name must differ from the app database name
+#     (host aliases, driver prefixes, and trailing options cannot bypass this).
+#   • The test database name must end with '_test'.
+#   • The live connection is re-checked immediately before any DROP.
 
 
 @pytest.fixture(scope="session")
@@ -43,12 +100,7 @@ def db_engine():
         pytest.skip("MAD_TEST_DATABASE_URL not set; skipping @pytest.mark.db tests")
 
     prod_url = get_database_url()
-    if url.rstrip("/") == prod_url.rstrip("/"):
-        pytest.fail(
-            "MAD_TEST_DATABASE_URL equals MAD_DATABASE_URL — refusing to run "
-            "destructive DB tests against the production database. "
-            "Point MAD_TEST_DATABASE_URL at a separate mad_test database."
-        )
+    _check_test_url(url, prod_url)
 
     engine = sa.create_engine(url)
 
@@ -59,12 +111,15 @@ def db_engine():
 
     yield engine
 
-    # Tear down: drop all model tables, then alembic_version.
-    Base.metadata.drop_all(engine)
-    with engine.connect() as conn:
-        conn.execute(sa.text("DROP TABLE IF EXISTS alembic_version"))
-        conn.commit()
-    engine.dispose()
+    # Belt-and-suspenders: re-verify the live database before any destructive DDL.
+    try:
+        _check_live_db(engine)
+        Base.metadata.drop_all(engine)
+        with engine.connect() as conn:
+            conn.execute(sa.text("DROP TABLE IF EXISTS alembic_version"))
+            conn.commit()
+    finally:
+        engine.dispose()
 
 
 @pytest.fixture()
