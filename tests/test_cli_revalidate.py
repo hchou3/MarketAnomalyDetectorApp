@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import argparse
-from datetime import date
+from datetime import date, datetime, timezone
 from decimal import Decimal
 
 import pytest
@@ -67,14 +67,18 @@ def test_cmd_revalidate_replaces_flags(db_engine, clean_db):
                 notes="",
             )
         )
+        session.flush()
         # NFCI / fred: two negative rows with a 25% relative change.
         # YAML sets allow_negative=True → no negative_value flag.
         # 25% < 50% macro_index threshold → no large_move flag either.
+        _ingested = datetime(2020, 1, 11, 0, 0, tzinfo=timezone.utc)
         session.add(
             PriceRow(
                 instrument_id="nfci",
                 provider="fred",
                 obs_date=date(2020, 1, 3),
+                known_at=date(2020, 1, 3),
+                ingested_at=_ingested,
                 value=Decimal("-0.40"),
             )
         )
@@ -83,6 +87,8 @@ def test_cmd_revalidate_replaces_flags(db_engine, clean_db):
                 instrument_id="nfci",
                 provider="fred",
                 obs_date=date(2020, 1, 10),
+                known_at=date(2020, 1, 10),
+                ingested_at=_ingested,
                 value=Decimal("-0.30"),
             )
         )
@@ -92,6 +98,8 @@ def test_cmd_revalidate_replaces_flags(db_engine, clean_db):
                 instrument_id="msci_usa",
                 provider="yahoo",
                 obs_date=date(2020, 1, 3),
+                known_at=date(2020, 1, 3),
+                ingested_at=_ingested,
                 value=Decimal("3000.00"),
             )
         )
@@ -100,6 +108,8 @@ def test_cmd_revalidate_replaces_flags(db_engine, clean_db):
                 instrument_id="msci_usa",
                 provider="yahoo",
                 obs_date=date(2020, 1, 6),
+                known_at=date(2020, 1, 6),
+                ingested_at=_ingested,
                 value=Decimal("3600.00"),
             )
         )

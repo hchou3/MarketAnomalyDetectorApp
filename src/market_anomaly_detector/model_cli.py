@@ -87,7 +87,7 @@ def _cmd_episodes(args: argparse.Namespace) -> int:
 
     print(
         f"episodes: {len(main_episodes)} episodes (merge_gap={merge_gap})"
-        f" → {out_path.relative_to(Path(__file__).parent.parent.parent)}"
+        f" -> {out_path.relative_to(Path(__file__).parent.parent.parent)}"
     )
     return 0
 
@@ -638,7 +638,7 @@ def _cmd_baselines(args: argparse.Namespace) -> int:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text("\n".join(out), encoding="utf-8")
     rel = out_path.relative_to(out_path.parent.parent)
-    print(f"baselines: {len(ep2_dev)} dev episodes → {rel}")
+    print(f"baselines: {len(ep2_dev)} dev episodes -> {rel}")
     return 0
 
 

@@ -315,8 +315,13 @@ def _write_explain_report(
             continue
 
         explainer = rows[0].explainer_used
+        thr = case.get("threshold")
+        thr_str = f"{thr:.3f}" if thr is not None else "—"
         lines += [
-            f"Fold year: {case['fold_year']} · Weeks: {len(rows)} · Explainer: {explainer}  ",
+            (
+                f"Fold year: {case['fold_year']} · Weeks: {len(rows)}"
+                f" · Threshold: {thr_str} · Explainer: {explainer}  "
+            ),
             "",
             "| Week | Prob | Margin | Alert? | Top-5 features (contribution) |",
             "|------|------|--------|--------|-------------------------------|",
@@ -324,8 +329,10 @@ def _write_explain_report(
 
         for r in rows:
             top5 = "; ".join(f"{f.col} ({f.contribution:+.3f})" for f in r.top_k_features)
+            alert_str = ("Y" if r.calibrated_prob >= thr else "N") if thr is not None else "—"
             lines.append(
-                f"| {r.week} | {r.calibrated_prob:.3f} | {r.raw_margin:+.3f} | — | {top5} |"
+                f"| {r.week} | {r.calibrated_prob:.3f}"
+                f" | {r.raw_margin:+.3f} | {alert_str} | {top5} |"
             )
 
         lines += ["", "#### Instrument rollup (mean contribution across case weeks)", ""]
@@ -429,7 +436,7 @@ def run_explain_cases(
             print(f"WARNING: no fold for year {fold_year}, skipping {case_name}")
             continue
 
-        pipe, platt, _thr = _rebuild_fold_detect_head(X_all, detect_arr, core_ok, ku_mask, fold)
+        pipe, platt, thr = _rebuild_fold_detect_head(X_all, detect_arr, core_ok, ku_mask, fold)
 
         test_weeks_all = weeks[fold.test_lo : fold.test_hi]
         core_test = core_ok[fold.test_lo : fold.test_hi]
@@ -469,7 +476,9 @@ def run_explain_cases(
         rows = explain(
             pipe, platt, X_case, SPEC_V1, weeks=case_weeks, top_k=5, X_background=X_background
         )
-        case_results.append({"name": case_name, "rows": rows, "fold_year": fold_year})
+        case_results.append(
+            {"name": case_name, "rows": rows, "fold_year": fold_year, "threshold": thr}
+        )
         print(
             f"  {case_name}: {len(rows)} week(s), "
             f"explainer={rows[0].explainer_used if rows else 'n/a'}"
@@ -487,5 +496,5 @@ def run_explain_cases(
     today = date.today().isoformat()
     out_path = out_dir / f"{today}-explanations.md"
     _write_explain_report(out_path, case_results, mean_abs_contrib, label_set, today)
-    print(f"explanations: {len(case_results)} case(s) → {out_path}")
+    print(f"explanations: {len(case_results)} case(s) -> {out_path}")
     return 0
