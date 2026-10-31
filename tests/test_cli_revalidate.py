@@ -160,14 +160,43 @@ def test_cmd_revalidate_replaces_flags(db_engine, clean_db):
         assert not any(f.rule == "negative_value" for f in msci_flags)
 
 
-# ── Smoke tests: every handler must survive its lazy imports ──────────────────
+# ── Smoke tests: every handler must fail fast against the sentinel URL ─────────
 #
-# Each handler uses lazy imports at the top of its function body.  Calling it
-# with a minimal Namespace and no live database exercises those imports.
-# A bad import (e.g. ImportError: cannot import name 'load_instruments') raises
-# before the handler's own try/except and escapes here, failing the test.
-# Normal failures (DB unreachable, CSV not found, etc.) are caught inside the
-# handler and returned as int exit codes, which the test accepts.
+# Each handler is called with the unreachable sentinel database URL (set by the
+# autouse _block_app_db fixture).  The handler must:
+#   • Import all its lazy dependencies without ImportError
+#   • Fail to connect and return a non-zero exit code
+#   • Never reach any network provider
+#
+# Provider network methods are also monkeypatched as a second-layer defence so
+# that even if control somehow reaches them (e.g. in a future refactor), the
+# test fails loudly rather than making a live network call.
+
+_SENTINEL = "postgresql+psycopg://nobody:x@127.0.0.1:1/never_app_test"
+
+
+def _block_network(monkeypatch) -> None:
+    """Raise if any live provider fetch method is called."""
+
+    def _no_network(*args, **kwargs):
+        raise AssertionError("live network call in a smoke test — fix the handler or test")
+
+    # yfinance (YahooProvider)
+    try:
+        import market_anomaly_detector.providers.yahoo as _ymod
+
+        monkeypatch.setattr(_ymod, "_yfinance_fetch", _no_network)
+    except ImportError:
+        pass
+
+    # FRED / Cboe (use shared http_get)
+    try:
+        import market_anomaly_detector.providers._http as _hmod
+
+        monkeypatch.setattr(_hmod, "http_get", _no_network)
+    except ImportError:
+        pass
+
 
 _MAD_DATA_HANDLERS: list[tuple[str, dict]] = [
     ("_cmd_sync_registry", {"allow_symbol_change": False}),
@@ -263,17 +292,20 @@ _MAD_MODEL_HANDLERS: list[tuple[str, dict]] = [
     _MAD_DATA_HANDLERS,
     ids=[h for h, _ in _MAD_DATA_HANDLERS],
 )
-def test_smoke_mad_data_handler_imports(handler, ns_kwargs):
-    """mad-data handler must get past its lazy imports without ImportError."""
+def test_smoke_mad_data_handler_imports(monkeypatch, handler, ns_kwargs):
+    """mad-data handler must import cleanly and fail non-zero against the sentinel DB."""
+    _block_network(monkeypatch)
     import market_anomaly_detector.cli as mod
 
     func = getattr(mod, handler)
-    ns = argparse.Namespace(database_url=None, **ns_kwargs)
+    ns = argparse.Namespace(database_url=_SENTINEL, **ns_kwargs)
     try:
         result = func(ns)
-    except SystemExit:
-        return  # business-logic exit — imports passed
+    except SystemExit as exc:
+        assert exc.code != 0, f"{handler} raised SystemExit(0) — expected non-zero"
+        return
     assert isinstance(result, int), f"{handler} must return int, got {type(result)}"
+    assert result != 0, f"{handler} returned 0 (success) against the sentinel URL"
 
 
 @pytest.mark.parametrize(
@@ -281,14 +313,17 @@ def test_smoke_mad_data_handler_imports(handler, ns_kwargs):
     _MAD_MODEL_HANDLERS,
     ids=[h for h, _ in _MAD_MODEL_HANDLERS],
 )
-def test_smoke_mad_model_handler_imports(handler, ns_kwargs):
-    """mad-model handler must get past its lazy imports without ImportError."""
+def test_smoke_mad_model_handler_imports(monkeypatch, handler, ns_kwargs):
+    """mad-model handler must import cleanly and fail non-zero against the sentinel DB."""
+    _block_network(monkeypatch)
     import market_anomaly_detector.model_cli as mod
 
     func = getattr(mod, handler)
-    ns = argparse.Namespace(database_url=None, **ns_kwargs)
+    ns = argparse.Namespace(database_url=_SENTINEL, **ns_kwargs)
     try:
         result = func(ns)
-    except SystemExit:
-        return  # business-logic exit — imports passed
+    except SystemExit as exc:
+        assert exc.code != 0, f"{handler} raised SystemExit(0) — expected non-zero"
+        return
     assert isinstance(result, int), f"{handler} must return int, got {type(result)}"
+    assert result != 0, f"{handler} returned 0 (success) against the sentinel URL"
