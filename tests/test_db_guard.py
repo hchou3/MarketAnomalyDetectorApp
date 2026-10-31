@@ -6,6 +6,7 @@ the pure URL-parsing and live-connection check logic, not the fixture itself.
 
 from __future__ import annotations
 
+import argparse
 from unittest.mock import MagicMock
 
 import pytest
@@ -123,3 +124,42 @@ def test_guard_live_db_rejects_none_database():
 
     with pytest.raises(RuntimeError, match="_test"):
         _check_live_db(engine)
+
+
+# ── Autouse _block_app_db sentinel checks ────────────────────────────────────
+
+
+def test_mad_database_url_is_sentinel_during_tests():
+    """The _block_app_db autouse fixture must override MAD_DATABASE_URL in every test."""
+    from market_anomaly_detector.db.engine import _DEFAULT_DATABASE_URL, get_database_url
+
+    url = get_database_url()
+    assert url != _DEFAULT_DATABASE_URL, (
+        f"get_database_url() returned the default app URL ({_DEFAULT_DATABASE_URL!r}). "
+        "The _block_app_db autouse fixture must be active for every test."
+    )
+    assert "127.0.0.1:1" in url, f"Expected sentinel URL, got {url!r}"
+
+
+def test_no_handler_opens_app_db_url(monkeypatch):
+    """A handler called with database_url=None must use the sentinel, not the app DB."""
+    import market_anomaly_detector.db.engine as _eng
+
+    opened: list[str] = []
+
+    def _spy(url, **kw):
+        opened.append(str(url))
+        raise OSError("connection blocked by test spy")
+
+    monkeypatch.setattr(_eng.sa, "create_engine", _spy)
+
+    import market_anomaly_detector.cli as _cli
+
+    # _cmd_sync_registry with database_url=None resolves via get_database_url(),
+    # which must return the sentinel set by the autouse fixture.
+    _cli._cmd_sync_registry(argparse.Namespace(database_url=None, allow_symbol_change=False))
+
+    assert opened, "expected spy to record at least one create_engine call"
+    assert not any(u == _eng._DEFAULT_DATABASE_URL for u in opened), (
+        f"Handler opened the default app database URL: {opened}"
+    )
