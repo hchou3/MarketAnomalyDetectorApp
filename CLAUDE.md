@@ -34,6 +34,16 @@ mad-backtest
 ruff check . && ruff format --check .
 ```
 
+## API keys
+
+Store keys in `.env` (never committed).  Pass them at runtime with `--env-file`:
+
+```bash
+uv run --env-file .env mad-data backfill   # uv loads .env; code reads os.environ["FRED_API_KEY"]
+```
+
+Do not add `python-dotenv`; `uv run --env-file` is sufficient.
+
 ## DB test safety
 
 **Never point `MAD_TEST_DATABASE_URL` at the app database.**

@@ -288,7 +288,7 @@ def upsert_prices(
             where=or_(
                 func.abs(PriceRow.__table__.c.value - ins.excluded.value)
                 > func.greatest(
-                    literal(1e-6), literal(1e-7) * func.abs(PriceRow.__table__.c.value)
+                    literal(1e-6), literal(1e-6) * func.abs(PriceRow.__table__.c.value)
                 ),
                 PriceRow.__table__.c.known_at.is_distinct_from(ins.excluded.known_at),
             ),
