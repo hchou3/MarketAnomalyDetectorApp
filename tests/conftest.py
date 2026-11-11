@@ -3,6 +3,7 @@
 import os
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 import sqlalchemy as sa
@@ -15,9 +16,15 @@ from alembic import command as alembic_command
 from market_anomaly_detector.data import FEATURE_COLS, engineer_features, load_data
 from market_anomaly_detector.db.engine import get_database_url
 from market_anomaly_detector.db.models import Base
-from market_anomaly_detector.paths import DATA_PATH, REPO_ROOT
+from market_anomaly_detector.paths import DATA_PATH
 from market_anomaly_detector.pipeline import AnomalyPipeline
 from market_anomaly_detector.splits import split_timeseries
+
+# Real repo root derived from this file's location — never patched by fixtures.
+# Use this (not paths.REPO_ROOT) wherever read-only repo files are needed
+# (alembic.ini, config/instruments.yaml, data/raw fixtures) so the autouse
+# _block_app_db fixture's REPO_ROOT patch cannot affect those lookups.
+REAL_REPO_ROOT = Path(__file__).resolve().parents[1]
 
 # Unreachable sentinel used as MAD_DATABASE_URL for every non-db test.
 # Port 1 is always refused; the database name ends with _test so the DB
@@ -38,7 +45,7 @@ def pytest_sessionfinish(session, exitstatus):
     """Fail the run if the test suite wrote anything under docs/ or data/."""
     result = subprocess.run(
         ["git", "status", "--porcelain", "--", "docs/", "data/"],
-        cwd=str(REPO_ROOT),
+        cwd=str(REAL_REPO_ROOT),
         capture_output=True,
         text=True,
     )
@@ -165,7 +172,7 @@ def db_engine():
     engine = sa.create_engine(url)
 
     # Build the schema via alembic so the fixture exercises the migration itself.
-    alembic_cfg = AlembicConfig(str(REPO_ROOT / "alembic.ini"))
+    alembic_cfg = AlembicConfig(str(REAL_REPO_ROOT / "alembic.ini"))
     alembic_cfg.attributes["database_url"] = url
     alembic_command.upgrade(alembic_cfg, "head")
 
