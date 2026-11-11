@@ -596,31 +596,20 @@ def test_upsert_prices_large_batch(db_session):
 def test_upsert_prices_float_noise_not_revised(db_session):
     """Re-fetch with sub-tolerance float noise must not count as a revision.
 
-    VWEHX-style case: stored value ~5.0, re-fetch differs by ~5e-6 (rounding
-    from float → Decimal).  Tolerance = max(1e-6, 1e-7 * 5.0) = 5e-7, so
-    5e-6 is above absolute tolerance.
-
-    Wait — per the spec: max(1e-6, 1e-7 * |old|).  For old=5.0:
-      1e-7 * 5.0 = 5e-7 < 1e-6 → tolerance = 1e-6.
-    A noise of 5e-6 > 1e-6, so it WOULD be revised under strict float comparison
-    but the tolerance floor of 1e-6 prevents it.
-
-    Actually re-read: tolerance = max(1e-6, 1e-7 * |old|).  For old=5.0:
-      relative part = 1e-7 * 5.0 = 5e-7
-      max(1e-6, 5e-7) = 1e-6.
-    5e-6 > 1e-6, so this noise IS above tolerance and WOULD be revised.
-
-    Per the spec the threshold is max(1e-6, 1e-7 * |old|); VWEHX noise of ~5e-6
-    on ~5.0 is above absolute floor (1e-6) but below the relative part when
-    |old| is larger (e.g. |old|=500 → 5e-5 threshold).  Use old=500 to
-    demonstrate: noise 5e-6 < 5e-5 → not revised.
+    Yahoo adjusted-close prices jitter at ~1e-6 relative between fetches.
+    Tolerance = max(1e-6, 1e-6 * |old|).  For a typical price old=100.0:
+      relative part = 1e-6 * 100 = 1e-4
+      max(1e-6, 1e-4) = 1e-4.
+    Noise of 5e-5 (= 5e-7 relative) is below 1e-4 → not revised.
+    The absolute floor alone (1e-6) would not protect this case; the relative
+    part is what prevents the false revision.
     """
     _insert_instrument(db_session, "noise_test")
     base = dict(
         instrument_id="noise_test",
         provider="yahoo",
         obs_date=date(2023, 5, 1),
-        value=Decimal("500.000000"),
+        value=Decimal("100.000000"),
         known_at=date(2023, 5, 1),
         run_id=None,
     )
@@ -628,8 +617,8 @@ def test_upsert_prices_float_noise_not_revised(db_session):
     db_session.flush()
     assert r1.rows_new == 1
 
-    # Re-fetch: value differs by 5e-6 (< 1e-7 * 500 = 5e-5 → below tolerance)
-    noisy = {**base, "value": Decimal("500.000005")}
+    # Re-fetch: value differs by 5e-5 (= 5e-7 relative; < 1e-6 * 100 = 1e-4 → below tolerance)
+    noisy = {**base, "value": Decimal("100.000050")}
     r2 = upsert_prices(db_session, [noisy])
     db_session.flush()
     assert r2.rows_revised == 0, "float noise below relative tolerance must not count as revision"
@@ -650,7 +639,7 @@ def test_upsert_prices_real_change_still_revised(db_session):
     upsert_prices(db_session, [base])
     db_session.flush()
 
-    # Change of 0.01 (1000x above tolerance floor of 1e-6, and >> 1e-7*5 = 5e-7)
+    # Change of 0.01 >> max(1e-6, 1e-6*5) = 5e-6 → well above tolerance
     changed = {**base, "value": Decimal("5.0100")}
     r2 = upsert_prices(db_session, [changed])
     db_session.flush()
