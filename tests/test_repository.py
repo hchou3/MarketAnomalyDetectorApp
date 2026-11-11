@@ -4,6 +4,7 @@ from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
 import pytest
+from conftest import REAL_REPO_ROOT
 
 from market_anomaly_detector.db.known_at import compute_known_at, obs_period_end
 from market_anomaly_detector.db.models import (
@@ -799,11 +800,10 @@ def test_migration_b2c3_downgrade_upgrade(db_engine):
     from alembic.runtime.migration import MigrationContext
 
     from alembic import command as _alembic_command
-    from market_anomaly_detector.paths import REPO_ROOT
 
     # str(url) masks the password as "***"; render it explicitly for Alembic.
     url = db_engine.url.render_as_string(hide_password=False)
-    alembic_cfg = _AlembicConfig(str(REPO_ROOT / "alembic.ini"))
+    alembic_cfg = _AlembicConfig(str(REAL_REPO_ROOT / "alembic.ini"))
     alembic_cfg.attributes["database_url"] = url
 
     # ── downgrade to the revision before b2c3 ────────────────────────────────
@@ -838,10 +838,9 @@ def test_migration_c3d4_downgrade_upgrade(db_engine):
     from alembic.runtime.migration import MigrationContext
 
     from alembic import command as _alembic_command
-    from market_anomaly_detector.paths import REPO_ROOT
 
     url = db_engine.url.render_as_string(hide_password=False)
-    alembic_cfg = _AlembicConfig(str(REPO_ROOT / "alembic.ini"))
+    alembic_cfg = _AlembicConfig(str(REAL_REPO_ROOT / "alembic.ini"))
     alembic_cfg.attributes["database_url"] = url
 
     # ── downgrade one step (c3d4 → b2c3) ─────────────────────────────────────
