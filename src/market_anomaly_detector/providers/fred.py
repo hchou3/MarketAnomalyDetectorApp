@@ -1,15 +1,18 @@
 """FRED provider — fetches time-series from the St. Louis Fed.
 
-Uses the public fredgraph.csv endpoint; no API key required for current-vintage
-data.  Date range is sent as ``cosd`` / ``coed`` query parameters so only the
-requested window is transferred.
+When ``FRED_API_KEY`` is set in the environment, the official JSON API at
+``api.stlouisfed.org`` is used (authenticated, reliable from any network).
+Without a key the public fredgraph.csv endpoint is used instead.
 
-If ``FRED_API_KEY`` is set in the environment, ``scripts/record_fixtures.py``
-can additionally query ALFRED for vintage history to measure publication lags.
+Missing values (".") are dropped in both paths.  ``FRED_API_KEY`` is never
+logged, printed, or stored; it is redacted from any exception text that could
+reach ingestion_run_items.error.
 """
 
 from __future__ import annotations
 
+import json
+import os
 import re
 from datetime import date
 from typing import Callable, Optional
@@ -20,7 +23,45 @@ import pandas as pd
 from ._http import http_get
 
 _FREDGRAPH_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv"
+_FRED_API_URL = "https://api.stlouisfed.org/fred/series/observations"
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_API_KEY_RE = re.compile(r"api_key=[^&\s]+")
+
+
+def _redact(text: str) -> str:
+    """Replace api_key=<value> in any string to prevent key leakage."""
+    return _API_KEY_RE.sub("api_key=REDACTED", text)
+
+
+def _parse_fred_json(text: str, symbol: str) -> pd.DataFrame:
+    """Parse a FRED JSON API response into a two-column DataFrame.
+
+    ``value == "."`` observations (missing data) are dropped.
+    """
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"FRED API for {symbol!r}: invalid JSON response") from exc
+
+    rows: list[tuple[str, str]] = []
+    for obs in data.get("observations", []):
+        date_str = obs.get("date", "")
+        value_str = obs.get("value", "")
+        if _DATE_RE.match(date_str) and value_str != ".":
+            rows.append((date_str, value_str))
+
+    if not rows:
+        raise ValueError(f"FRED series {symbol!r} returned no usable data rows")
+
+    df = pd.DataFrame(rows, columns=["obs_date", "value"])
+    df["obs_date"] = pd.to_datetime(df["obs_date"]).dt.date
+    df["value"] = pd.to_numeric(df["value"], errors="coerce")
+    df = df.dropna(subset=["value"]).copy()
+
+    if df.empty:
+        raise ValueError(f"FRED series {symbol!r} returned no usable data rows")
+
+    return df.sort_values("obs_date").reset_index(drop=True)
 
 
 def _strip_preamble(text: str) -> str:
@@ -75,9 +116,11 @@ def _parse_fred_response(text: str, symbol: str) -> pd.DataFrame:
 
 
 class FredProvider:
-    """Fetch data from FRED using the public fredgraph.csv endpoint.
+    """Fetch data from FRED.
 
-    Missing values (".") are silently dropped.  An empty or all-missing series
+    When ``FRED_API_KEY`` is present in the environment the official JSON API
+    is used; otherwise the public fredgraph.csv endpoint is used.  Missing
+    values (".") are dropped in both paths.  An empty or all-missing series
     raises ValueError so callers can fall back to a lower-priority source.
     """
 
@@ -92,17 +135,43 @@ class FredProvider:
         start: Optional[date] = None,
         end: Optional[date] = None,
     ) -> pd.DataFrame:
-        """Return DataFrame[obs_date: date, value: float] for one FRED series.
+        """Return DataFrame[obs_date: date, value: float] for one FRED series."""
+        api_key = os.environ.get("FRED_API_KEY")
+        if api_key:
+            return self._get_history_api(symbol, start, api_key)
+        return self._get_history_csv(symbol, start, end)
 
-        ``start`` and ``end`` (inclusive) are passed as ``cosd`` / ``coed``
-        query parameters to limit the response to the requested window.
-        """
+    def _get_history_api(
+        self,
+        symbol: str,
+        start: Optional[date],
+        api_key: str,
+    ) -> pd.DataFrame:
+        params: dict[str, str] = {
+            "series_id": symbol,
+            "api_key": api_key,
+            "file_type": "json",
+        }
+        if start is not None:
+            params["observation_start"] = start.isoformat()
+        url = f"{_FRED_API_URL}?{urlencode(params)}"
+        try:
+            text = self._fetch(url)
+        except Exception as exc:
+            raise RuntimeError(f"FRED API error for {symbol!r}: {_redact(str(exc))}") from None
+        return _parse_fred_json(text, symbol)
+
+    def _get_history_csv(
+        self,
+        symbol: str,
+        start: Optional[date],
+        end: Optional[date],
+    ) -> pd.DataFrame:
         params: dict[str, str] = {"id": symbol}
         if start is not None:
             params["cosd"] = start.isoformat()
         if end is not None:
             params["coed"] = end.isoformat()
         url = f"{_FREDGRAPH_URL}?{urlencode(params)}"
-
         text = self._fetch(url)
         return _parse_fred_response(text, symbol)

@@ -255,3 +255,70 @@ def test_fred_live_dexjpus_range():
     hist = provider.get_history("DEXJPUS", start=date(2024, 1, 1), end=date(2024, 1, 31))
     assert not hist.empty
     assert all(date(2024, 1, 1) <= d <= date(2024, 1, 31) for d in hist["obs_date"])
+
+
+# ── JSON API path (offline, FRED_API_KEY mocked) ──────────────────────────────
+
+
+def test_fred_api_drops_dot_values(monkeypatch):
+    monkeypatch.setenv("FRED_API_KEY", "testkey123")
+    provider = FredProvider(_fetcher=lambda url: _load("DGS10_api.json"))
+    hist = provider.get_history("DGS10")
+    assert hist["value"].notna().all()
+    assert date(2024, 1, 5) not in hist["obs_date"].values
+    assert len(hist) == 6  # 7 observations minus 1 "."
+
+
+def test_fred_api_columns(monkeypatch):
+    monkeypatch.setenv("FRED_API_KEY", "testkey123")
+    provider = FredProvider(_fetcher=lambda url: _load("DGS10_api.json"))
+    hist = provider.get_history("DGS10")
+    assert list(hist.columns) == ["obs_date", "value"]
+    assert isinstance(hist["obs_date"].iloc[0], date)
+
+
+def test_fred_api_observation_start_in_url(monkeypatch):
+    monkeypatch.setenv("FRED_API_KEY", "testkey123")
+    fetcher = _CapturingFetcher(_load("DGS10_api.json"))
+    provider = FredProvider(_fetcher=fetcher)
+    provider.get_history("DGS10", start=date(2024, 1, 1))
+    assert "observation_start=2024-01-01" in fetcher.calls[0]
+
+
+def test_fred_api_no_observation_start_without_start(monkeypatch):
+    monkeypatch.setenv("FRED_API_KEY", "testkey123")
+    fetcher = _CapturingFetcher(_load("DGS10_api.json"))
+    provider = FredProvider(_fetcher=fetcher)
+    provider.get_history("DGS10")
+    assert "observation_start" not in fetcher.calls[0]
+
+
+def test_fred_uses_api_when_key_set(monkeypatch):
+    monkeypatch.setenv("FRED_API_KEY", "testkey123")
+    fetcher = _CapturingFetcher(_load("DGS10_api.json"))
+    provider = FredProvider(_fetcher=fetcher)
+    provider.get_history("DGS10")
+    assert "api.stlouisfed.org/fred/series/observations" in fetcher.calls[0]
+    assert "fredgraph.csv" not in fetcher.calls[0]
+
+
+def test_fred_uses_csv_when_no_key(monkeypatch):
+    monkeypatch.delenv("FRED_API_KEY", raising=False)
+    fetcher = _CapturingFetcher(_load("DGS10.csv"))
+    provider = FredProvider(_fetcher=fetcher)
+    provider.get_history("DGS10")
+    assert "fredgraph.csv" in fetcher.calls[0]
+    assert "api.stlouisfed.org" not in fetcher.calls[0]
+
+
+def test_fred_api_key_redacted_in_error(monkeypatch):
+    monkeypatch.setenv("FRED_API_KEY", "supersecretkey99")
+
+    def failing_fetch(url: str) -> str:
+        raise RuntimeError(f"connection failed: {url}")
+
+    provider = FredProvider(_fetcher=failing_fetch)
+    with pytest.raises(Exception) as exc_info:
+        provider.get_history("DGS10")
+    assert "supersecretkey99" not in str(exc_info.value)
+    assert "REDACTED" in str(exc_info.value)

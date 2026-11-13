@@ -73,6 +73,20 @@ export MAD_TEST_DATABASE_URL=postgresql+psycopg://mad:mad@localhost:5432/mad_tes
 pytest -m db -v
 ```
 
+### FRED API key
+
+FRED data is fetched via the official API when `FRED_API_KEY` is set; without it
+the public fredgraph.csv endpoint is used (which may time out from some networks).
+Get a free key at [fredaccount.stlouisfed.org](https://fredaccount.stlouisfed.org),
+store it in the git-ignored `.env` file, and pass it at runtime:
+
+```bash
+echo "FRED_API_KEY=your_key_here" >> .env
+uv run --env-file .env mad-data backfill
+```
+
+`.env` is already listed in `.gitignore`; never commit it.
+
 ## Usage
 
 ```bash
