@@ -12,6 +12,7 @@ poisoning the outer transaction.
 from __future__ import annotations
 
 import contextlib
+import logging
 from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import Any, Callable, Optional, Protocol, runtime_checkable
@@ -21,6 +22,8 @@ import pandas as pd
 
 from .db.known_at import compute_known_at
 from .registry import Instrument
+
+log = logging.getLogger(__name__)
 
 
 @runtime_checkable
@@ -178,12 +181,16 @@ def _process_one(
 
     errors: list[str] = []
     last_provider: Optional[str] = None
+    first_error_msg: Optional[str] = None
 
-    for source in live_sources:
+    for idx, source in enumerate(live_sources):
         last_provider = source.provider
         provider = providers.get(source.provider)
         if provider is None:
-            errors.append(f"{source.provider}: not in providers map")
+            err = f"{source.provider}: not in providers map"
+            errors.append(err)
+            if idx == 0:
+                first_error_msg = err
             continue
 
         freq = (
@@ -232,10 +239,18 @@ def _process_one(
             error_msg = str(exc)[:500]
 
         if error_msg is None:
+            if idx > 0:
+                log.warning(
+                    "%s: %s failed (%s); used %s",
+                    instrument.id,
+                    live_sources[0].provider,
+                    first_error_msg or "unknown error",
+                    source.provider,
+                )
             return InstrumentResult(
                 instrument_id=instrument.id,
                 provider=source.provider,
-                status="ok",
+                status="fallback" if idx > 0 else "ok",
                 rows_new=n_new,
                 rows_revised=n_revised,
                 first_date=rows[0]["obs_date"] if rows else None,
@@ -244,6 +259,8 @@ def _process_one(
                 max_abs_revision=max_abs,
                 max_rel_revision=max_rel,
             )
+        if idx == 0:
+            first_error_msg = error_msg
         errors.append(f"{source.provider}/{source.symbol}: {error_msg}")
 
     return InstrumentResult(

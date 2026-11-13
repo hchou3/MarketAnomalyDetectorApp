@@ -200,10 +200,13 @@ def _cmd_backfill(args: argparse.Namespace) -> int:
                 since=since,
             )
 
-            ok = failed = skipped = total_new = total_revised = 0
+            ok = failed = skipped = fallback = 0
+            total_new = total_revised = 0
             for r in results:
-                if r.status == "ok":
+                if r.status in ("ok", "fallback"):
                     ok += 1
+                    if r.status == "fallback":
+                        fallback += 1
                     total_new += r.rows_new
                     total_revised += r.rows_revised
                     add_run_item(
@@ -211,7 +214,7 @@ def _cmd_backfill(args: argparse.Namespace) -> int:
                         run,
                         r.instrument_id,
                         r.provider,
-                        "ok",
+                        r.status,
                         rows_new=r.rows_new,
                         rows_revised=r.rows_revised,
                         first_date=r.first_date,
@@ -254,10 +257,13 @@ def _cmd_backfill(args: argparse.Namespace) -> int:
         return 1
 
     total_rows = total_new + total_revised
-    print(
-        f"backfill: {ok} ok, {failed} failed, {skipped} skipped, "
-        f"{total_rows} rows ({total_new} new, {total_revised} revised)."
-    )
+    ok_strict = ok - fallback
+    parts = [f"{ok_strict} ok"]
+    if fallback > 0:
+        parts.append(f"{fallback} fallback")
+    parts += [f"{failed} failed", f"{skipped} skipped"]
+    rows_detail = f"{total_rows} rows ({total_new} new, {total_revised} revised)"
+    print(f"backfill: {', '.join(parts)}, {rows_detail}.")
     return 1 if (ok == 0 and failed > 0) else 0
 
 
@@ -327,10 +333,13 @@ def _cmd_update(args: argparse.Namespace) -> int:
                 get_start=get_start,
             )
 
-            ok = failed = skipped = total_new = total_revised = 0
+            ok = failed = skipped = fallback = 0
+            total_new = total_revised = 0
             for r in results:
-                if r.status == "ok":
+                if r.status in ("ok", "fallback"):
                     ok += 1
+                    if r.status == "fallback":
+                        fallback += 1
                     total_new += r.rows_new
                     total_revised += r.rows_revised
                     add_run_item(
@@ -338,7 +347,7 @@ def _cmd_update(args: argparse.Namespace) -> int:
                         run,
                         r.instrument_id,
                         r.provider,
-                        "ok",
+                        r.status,
                         rows_new=r.rows_new,
                         rows_revised=r.rows_revised,
                         first_date=r.first_date,
@@ -381,10 +390,13 @@ def _cmd_update(args: argparse.Namespace) -> int:
         return 1
 
     total_rows = total_new + total_revised
-    print(
-        f"update: {ok} ok, {failed} failed, {skipped} skipped, "
-        f"{total_rows} rows ({total_new} new, {total_revised} revised)."
-    )
+    ok_strict = ok - fallback
+    parts = [f"{ok_strict} ok"]
+    if fallback > 0:
+        parts.append(f"{fallback} fallback")
+    parts += [f"{failed} failed", f"{skipped} skipped"]
+    rows_detail = f"{total_rows} rows ({total_new} new, {total_revised} revised)"
+    print(f"update: {', '.join(parts)}, {rows_detail}.")
     return 1 if (ok == 0 and failed > 0) else 0
 
 
@@ -444,6 +456,12 @@ def _cmd_status(args: argparse.Namespace) -> int:
             )
             for it in revised_items:
                 print(f"    {it.instrument_id}/{it.provider}: {it.rows_revised} revised")
+
+        fallback_items = [it for it in last_run_items if it.status == "fallback"]
+        if fallback_items:
+            print(f"  fallback: {len(fallback_items)} instrument(s) used lower-priority sources")
+            for it in fallback_items:
+                print(f"    {it.instrument_id}: used {it.provider}")
 
     # ── Stale instruments ─────────────────────────────────────────────────────
     # Group per-source rows by instrument.

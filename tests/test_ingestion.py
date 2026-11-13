@@ -200,7 +200,7 @@ def test_backfill_failure_isolation():
 
 
 def test_backfill_fallback_to_priority_2():
-    """When priority 1 fails, priority 2 is used and recorded in the result."""
+    """When priority 1 fails, priority 2 is used; status is 'fallback', not 'ok'."""
     inst = _inst(
         "us_10y",
         [
@@ -215,10 +215,52 @@ def test_backfill_fallback_to_priority_2():
     results = run_backfill([inst], providers={"fred": fred, "yahoo": yahoo}, sink=sink)
 
     r = results[0]
-    assert r.status == "ok"
+    assert r.status == "fallback"
     assert r.provider == "yahoo"
     assert r.rows_written == 3
     assert all(row["provider"] == "yahoo" for row in sink.rows)
+
+
+def test_backfill_fallback_logs_warning(caplog):
+    """A fallback should emit a WARNING naming the failed primary and the used fallback."""
+    import logging
+
+    inst = _inst(
+        "us_10y",
+        [
+            _src("fred", "DGS10", 1),
+            _src("yahoo", "^TNX", 2),
+        ],
+    )
+    fred = FakeProvider("fred", {"DGS10": ValueError("connection timeout")})
+    yahoo = FakeProvider("yahoo", {"^TNX": _df(_THREE_ROWS)})
+    sink = CapturingSink()
+
+    with caplog.at_level(logging.WARNING, logger="market_anomaly_detector.ingestion"):
+        run_backfill([inst], providers={"fred": fred, "yahoo": yahoo}, sink=sink)
+
+    messages = [r.message for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("fred" in m and "yahoo" in m for m in messages)
+
+
+def test_backfill_fallback_status_recorded():
+    """run_backfill returns status='fallback' when a lower-priority source is used."""
+    inst = _inst(
+        "us_10y",
+        [
+            _src("fred", "DGS10", 1),
+            _src("yahoo", "^TNX", 2),
+        ],
+    )
+    fred = FakeProvider("fred", {"DGS10": ValueError("unavailable")})
+    yahoo = FakeProvider("yahoo", {"^TNX": _df(_THREE_ROWS)})
+    sink = CapturingSink()
+
+    results = run_backfill([inst], providers={"fred": fred, "yahoo": yahoo}, sink=sink)
+
+    r = results[0]
+    assert r.status == "fallback"
+    assert r.rows_written == 3
 
 
 def test_backfill_all_sources_fail():
