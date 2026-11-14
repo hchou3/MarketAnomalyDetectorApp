@@ -169,6 +169,78 @@ def _register_converters() -> None:
         pass  # skl2onnx not available or registration failed; gate will report passed=False
 
 
+def _patch_hgb_tec_to_double(onnx_model, clf) -> None:
+    """Upgrade the HGB TreeEnsembleClassifier to float64 thresholds in-place.
+
+    Extracts float64 split thresholds from ``clf._predictors``, replaces the
+    float32 ``nodes_values`` attribute with a float64 ``nodes_values_as_tensor``
+    tensor, upgrades the model's ``ai.onnx.ml`` opset to 3, and annotates the
+    TEC ``probabilities`` output as float32 so onnxruntime's type checker
+    accepts it (ORT always produces float32 for TEC probability outputs).
+
+    This is called only for HGB pipelines exported with a float64 sample.
+    """
+    import onnx
+    from onnx import TensorProto, numpy_helper
+
+    tec_node = next(
+        (n for n in onnx_model.graph.node if n.op_type == "TreeEnsembleClassifier"),
+        None,
+    )
+    if tec_node is None:
+        raise RuntimeError("No TreeEnsembleClassifier node found in ONNX graph")
+
+    # Build float64 threshold array in ONNX node order:
+    # branch positions → float64 from sklearn; leaf positions → 0.0
+    sklearn_branch_thresholds = np.concatenate(
+        [
+            tree_preds[0].nodes["num_threshold"][tree_preds[0].nodes["is_leaf"] == 0]
+            for tree_preds in clf._predictors
+        ]
+    )
+    modes_attr = next(a for a in tec_node.attribute if a.name == "nodes_modes")
+    modes = [m.decode() for m in modes_attr.strings]
+    branch_mask = np.array([m == "BRANCH_LEQ" for m in modes])
+
+    thresholds_f64 = np.zeros(len(modes), dtype=np.float64)
+    bidx = 0
+    for i, is_branch in enumerate(branch_mask):
+        if is_branch:
+            thresholds_f64[i] = sklearn_branch_thresholds[bidx]
+            bidx += 1
+
+    # Replace nodes_values (float32 attr) with nodes_values_as_tensor (float64 tensor)
+    for attr in list(tec_node.attribute):
+        if attr.name == "nodes_values":
+            tec_node.attribute.remove(attr)
+    new_attr = onnx.AttributeProto()
+    new_attr.name = "nodes_values_as_tensor"
+    new_attr.type = onnx.AttributeProto.TENSOR
+    new_attr.t.CopyFrom(numpy_helper.from_array(thresholds_f64))
+    tec_node.attribute.append(new_attr)
+
+    # Upgrade ai.onnx.ml opset to 3 (required for nodes_values_as_tensor)
+    for op_import in onnx_model.opset_import:
+        if op_import.domain == "ai.onnx.ml":
+            op_import.version = 3
+
+    # ORT always outputs float32 for TEC probabilities even with double input.
+    # Annotate the TEC probability output as FLOAT in both graph.output and value_info
+    # so ORT's type checker is satisfied.
+    tec_prob_name = tec_node.output[1]
+    for container in (onnx_model.graph.value_info, onnx_model.graph.output):
+        for vi in container:
+            if vi.name == tec_prob_name and vi.type.tensor_type.elem_type == TensorProto.DOUBLE:
+                vi.type.tensor_type.elem_type = TensorProto.FLOAT
+    # Also add an explicit value_info entry for the TEC probability output so ORT
+    # does not need to re-infer the type (inference would give double for double input).
+    prob_vi = next((o for o in onnx_model.graph.output if o.name == tec_prob_name), None)
+    if prob_vi is not None:
+        new_vi = onnx_model.graph.value_info.add()
+        new_vi.CopyFrom(prob_vi)
+        new_vi.type.tensor_type.elem_type = TensorProto.FLOAT
+
+
 def onnx_export_with_platt(
     pipeline,
     platt: PlattCalibrator,
@@ -177,8 +249,12 @@ def onnx_export_with_platt(
 ) -> bytes:
     """Export sklearn pipeline + Platt calibration to ONNX bytes.
 
-    The returned model takes a float32 input of shape [N, n_features] and
-    outputs a float32 array of shape [N] with calibrated probabilities.
+    When X_sample is float32 (or None): returns a float32 model.
+    When X_sample is float64 and the pipeline's last step is an HGB:
+      returns a float64 model with float64 split thresholds extracted from
+      sklearn's internal predictors, so ONNX matches sklearn exactly even for
+      discrete-grid feature values that would straddle float32-rounded thresholds.
+      The output ``calibrated_probability`` is float64.
 
     When platt.use_logit is False (logreg, HGB): exports with raw_scores=True
     so the ONNX graph uses the model's raw margin directly, matching
@@ -201,17 +277,31 @@ def onnx_export_with_platt(
     if X_sample is None:
         X_sample = np.zeros((5, n_features), dtype=np.float32)
 
+    is_f64 = X_sample.dtype == np.float64
+
     clf_step = pipeline.steps[-1][1]
     onnx_opts: dict = {"zipmap": False}
     if not use_logit:
         onnx_opts["raw_scores"] = True
 
-    onnx_model = to_onnx(
-        pipeline,
-        X_sample[:5].astype(np.float32),
-        options={id(clf_step): onnx_opts},
-        target_opset={"": 17, "ai.onnx.ml": 3},
-    )
+    if is_f64:
+        from skl2onnx.common.data_types import DoubleTensorType
+
+        onnx_model = to_onnx(
+            pipeline,
+            X_sample[:5],
+            options={id(clf_step): onnx_opts},
+            initial_types=[("X", DoubleTensorType([None, n_features]))],
+            target_opset={"": 17, "ai.onnx.ml": 3},
+        )
+        _patch_hgb_tec_to_double(onnx_model, clf_step)
+    else:
+        onnx_model = to_onnx(
+            pipeline,
+            X_sample[:5].astype(np.float32),
+            options={id(clf_step): onnx_opts},
+            target_opset={"": 17, "ai.onnx.ml": 3},
+        )
 
     # output[1] is probabilities [N,2] (use_logit) or raw class scores [N,2] (not use_logit).
     # For binary classification both shapes are [N, 2]; Gather(axis=1, index=1) extracts
@@ -222,19 +312,33 @@ def onnx_export_with_platt(
     while onnx_model.graph.output:
         onnx_model.graph.output.pop()
 
+    platt_dtype = np.float64 if is_f64 else np.float32
+    out_proto_dtype = TensorProto.DOUBLE if is_f64 else TensorProto.FLOAT
+
+    gather_input = score_output_name
+    if is_f64:
+        # TEC always outputs float32 for probabilities; cast to float64 for Platt.
+        cast_out = "__platt_cast_f64"
+        onnx_model.graph.node.append(
+            helper.make_node(
+                "Cast", inputs=[score_output_name], outputs=[cast_out], to=TensorProto.DOUBLE
+            )
+        )
+        gather_input = cast_out
+
     # Gather class-1 value → shape [N]
     gather_out = "__platt_gather"
     idx_name = "__platt_idx"
     idx_tensor = numpy_helper.from_array(np.array(1, dtype=np.int64), name=idx_name)
     onnx_model.graph.initializer.append(idx_tensor)
     gather_node = helper.make_node(
-        "Gather", inputs=[score_output_name, idx_name], outputs=[gather_out], axis=1
+        "Gather", inputs=[gather_input, idx_name], outputs=[gather_out], axis=1
     )
     onnx_model.graph.node.append(gather_node)
 
     a_name, b_name = "__platt_a", "__platt_b"
-    a_tensor = numpy_helper.from_array(np.array([platt.a], dtype=np.float32), name=a_name)
-    b_tensor = numpy_helper.from_array(np.array([platt.b], dtype=np.float32), name=b_name)
+    a_tensor = numpy_helper.from_array(np.array([platt.a], dtype=platt_dtype), name=a_name)
+    b_tensor = numpy_helper.from_array(np.array([platt.b], dtype=platt_dtype), name=b_name)
     onnx_model.graph.initializer.extend([a_tensor, b_tensor])
 
     mul_out = "__platt_mul"
@@ -256,11 +360,11 @@ def onnx_export_with_platt(
         # Logit path: sigmoid(a * logit(clip(prob)) + b).
         clip_min_name, clip_max_name = "__platt_clip_min", "__platt_clip_max"
         one_name = "__platt_one"
-        clip_min_t = numpy_helper.from_array(np.array(1e-6, dtype=np.float32), name=clip_min_name)
+        clip_min_t = numpy_helper.from_array(np.array(1e-6, dtype=platt_dtype), name=clip_min_name)
         clip_max_t = numpy_helper.from_array(
-            np.array(1.0 - 1e-6, dtype=np.float32), name=clip_max_name
+            np.array(1.0 - 1e-6, dtype=platt_dtype), name=clip_max_name
         )
-        one_t = numpy_helper.from_array(np.array(1.0, dtype=np.float32), name=one_name)
+        one_t = numpy_helper.from_array(np.array(1.0, dtype=platt_dtype), name=one_name)
         onnx_model.graph.initializer.extend([clip_min_t, clip_max_t, one_t])
 
         clip_out = "__platt_clip"
@@ -296,7 +400,7 @@ def onnx_export_with_platt(
             helper.make_node("Sigmoid", inputs=[add_out], outputs=[final_out])
         )
 
-    final_output_info = helper.make_tensor_value_info(final_out, TensorProto.FLOAT, [None])
+    final_output_info = helper.make_tensor_value_info(final_out, out_proto_dtype, [None])
     onnx_model.graph.output.append(final_output_info)
 
     onnx.checker.check_model(onnx_model)

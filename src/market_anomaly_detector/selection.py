@@ -476,8 +476,9 @@ def check_onnx_gate(
     try:
         sess = ort.InferenceSession(onnx_bytes)
         input_name = sess.get_inputs()[0].name
-        X_f32 = X_sample.astype(np.float32)
-        ort_probs = sess.run(["calibrated_probability"], {input_name: X_f32})[0].flatten()
+        # Feed the same dtype to ORT as the exported model expects (float32 or float64).
+        X_ort = X_sample if X_sample.dtype == np.float64 else X_sample.astype(np.float32)
+        ort_probs = sess.run(["calibrated_probability"], {input_name: X_ort})[0].flatten()
 
         if platt.use_logit:
             sklearn_raw = pipeline.predict_proba(X_sample)[:, 1]
@@ -485,7 +486,7 @@ def check_onnx_gate(
             sklearn_raw = pipeline.decision_function(X_sample)
         sklearn_probs = platt.transform(sklearn_raw)
 
-        max_diff = float(np.max(np.abs(ort_probs - sklearn_probs.astype(np.float32))))
+        max_diff = float(np.max(np.abs(ort_probs - sklearn_probs.astype(np.float64))))
         passed = max_diff <= 1e-5
         return OnnxGateResult(passed=passed, max_diff=max_diff, error=None)
     except Exception as e:

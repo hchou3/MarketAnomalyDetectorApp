@@ -13,9 +13,9 @@ Artifact layout
 ---------------
 artifacts/<model_version>/
   model.joblib   sklearn HGB pipeline (detect head)
-  model.onnx     HGB + Platt graph; input [N,51] float32, output calibrated_probability
+  model.onnx     HGB + Platt graph; input [N,51] float64, output calibrated_probability (float64)
   metadata.json  all fields required by the spec
-  train_X.npy    first 500 training rows kept for offline export/parity re-check
+  train_X.npy    first 500 training rows kept for offline export/parity re-check (float64)
 
 model_version format: v1-<YYYY-MM-DD>-<spec_hash[:8]>
 """
@@ -243,7 +243,9 @@ def _fit_final_model(
         platt_predict.a, platt_predict.b = 1.0, 0.0
 
     # ── ONNX parity on training rows ─────────────────────────────────────────
-    gate_X = X_train[: min(500, len(X_train))].astype(np.float32)
+    # Keep float64 so the exported model uses double-precision thresholds and
+    # the gate comparison is sklearn(f64) vs ONNX(f64) — exact parity.
+    gate_X = X_train[: min(500, len(X_train))]
     gate = check_onnx_gate("hgb", pipe_detect, platt_detect, gate_X, n_features)
     if not gate.passed:
         raise RuntimeError(
@@ -451,9 +453,9 @@ def run_export(
 
     gate_X: np.ndarray
     if train_X_path.exists():
-        gate_X = np.load(train_X_path).astype(np.float32)
+        gate_X = np.load(train_X_path)  # preserve saved dtype (float64 for new models)
     else:
-        gate_X = np.zeros((5, n_features), dtype=np.float32)
+        gate_X = np.zeros((5, n_features), dtype=np.float64)
 
     gate = check_onnx_gate("hgb", pipe, platt, gate_X, n_features)
     if not gate.passed:

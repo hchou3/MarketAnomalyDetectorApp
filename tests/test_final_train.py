@@ -84,7 +84,7 @@ def test_spec_hash_matches_pinned():
 
 
 def test_onnx_parity_synthetic():
-    """HGB + Platt -> ONNX max_diff ≤ 1e-5 on synthetic data with NaN features."""
+    """HGB + Platt -> ONNX max_diff ≤ 1e-5 on synthetic float64 data with NaN features."""
     pytest.importorskip("onnxruntime")
     pytest.importorskip("skl2onnx")
 
@@ -114,10 +114,58 @@ def test_onnx_parity_synthetic():
     raw_val = pipe.decision_function(X_val)
     platt = PlattCalibrator(use_logit=False).fit(raw_val, y_val)
 
-    gate_X = X_train[:100].astype(np.float32)
+    gate_X = X_train[:100]  # float64 — gate exports and validates in float64
     gate = check_onnx_gate("hgb", pipe, platt, gate_X, n_features)
 
     assert gate.passed, f"ONNX parity check failed: max_diff={gate.max_diff}, error={gate.error}"
+    assert gate.max_diff <= 1e-5
+
+
+def test_onnx_parity_bp_grid_fixture():
+    """ONNX parity ≤ 1e-5 on exact bp-change grid values and near-threshold points.
+
+    Trains HGB on float64 data with discrete 0.25 bp-step features — the same
+    distribution as real macro bp-change inputs.  With float32 thresholds the
+    split decisions flip and produce ~0.05 diff; with float64 thresholds the
+    gate must pass.
+    """
+    pytest.importorskip("onnxruntime")
+    pytest.importorskip("skl2onnx")
+
+    import numpy as np
+
+    from market_anomaly_detector.calibration import PlattCalibrator
+    from market_anomaly_detector.selection import check_onnx_gate, make_hgb_pipeline
+
+    n_features = 10
+    rng = np.random.default_rng(99)
+    # Half Gaussian, half bp-change grid
+    bp_grid = np.arange(-100, 150, 0.25) * 1e-4
+    n_total = 400
+    X_gauss = rng.standard_normal((n_total, n_features // 2))
+    X_bp = rng.choice(bp_grid, size=(n_total, n_features // 2))
+    X = np.column_stack([X_gauss, X_bp])  # float64, no NaN
+    y = ((X[:, 0] + X[:, n_features // 2] * 50) > 0).astype(int)
+    y[:5] = 1
+    y[5:10] = 0
+
+    n_train = 300
+    X_train, X_val = X[:n_train], X[n_train:]
+    y_train, y_val = y[:n_train], y[n_train:]
+
+    pipe = make_hgb_pipeline()
+    pipe.fit(X_train, y_train)
+
+    raw_val = pipe.decision_function(X_val)
+    platt = PlattCalibrator(use_logit=False).fit(raw_val, y_val)
+
+    gate_X = X_train[:100]  # float64 — exercises bp-grid threshold precision
+    gate = check_onnx_gate("hgb", pipe, platt, gate_X, n_features)
+
+    assert gate.passed, (
+        f"float64 ONNX gate failed on bp-grid data: "
+        f"max_diff={gate.max_diff:.4e}, error={gate.error}"
+    )
     assert gate.max_diff <= 1e-5
 
 
