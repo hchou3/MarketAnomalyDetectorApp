@@ -753,7 +753,7 @@ def test_migration_is_at_head(db_engine):
         ctx = MigrationContext.configure(conn)
         heads = ctx.get_current_heads()
 
-    assert "c3d4e5f6a7b8" in heads, f"Expected revision c3d4e5f6a7b8 in heads, got {heads!r}"
+    assert "d4e5f6a7b8c9" in heads, f"Expected revision d4e5f6a7b8c9 in heads, got {heads!r}"
 
 
 @pytest.mark.db
@@ -854,7 +854,49 @@ def test_migration_c3d4_downgrade_upgrade(db_engine):
     with db_engine.connect() as conn2:
         ctx2 = MigrationContext.configure(conn2)
         final_heads = ctx2.get_current_heads()
-    assert "c3d4e5f6a7b8" in final_heads
+    assert "d4e5f6a7b8c9" in final_heads
+
+
+@pytest.mark.db
+def test_migration_d4e5_downgrade_upgrade(db_engine):
+    """The d4e5f6a7b8c9 migration can be downgraded and re-upgraded cleanly."""
+    import sqlalchemy as _sa
+    from alembic.config import Config as _AlembicConfig
+    from alembic.runtime.migration import MigrationContext
+
+    from alembic import command as _alembic_command
+
+    url = db_engine.url.render_as_string(hide_password=False)
+    alembic_cfg = _AlembicConfig(str(REAL_REPO_ROOT / "alembic.ini"))
+    alembic_cfg.attributes["database_url"] = url
+
+    # ── downgrade one step (d4e5 → c3d4) ─────────────────────────────────────
+    _alembic_command.downgrade(alembic_cfg, "c3d4e5f6a7b8")
+
+    insp = _sa.inspect(db_engine)
+    regime_cols = {c["name"]: c for c in insp.get_columns("regime_scores")}
+    assert not regime_cols["probability"]["nullable"], (
+        "probability must be NOT NULL after downgrade"
+    )
+    assert not regime_cols["alert"]["nullable"], "alert must be NOT NULL after downgrade"
+
+    with db_engine.connect() as conn:
+        ctx = MigrationContext.configure(conn)
+        mid_heads = ctx.get_current_heads()
+    assert "c3d4e5f6a7b8" in mid_heads
+
+    # ── re-upgrade to head ────────────────────────────────────────────────────
+    _alembic_command.upgrade(alembic_cfg, "head")
+
+    insp2 = _sa.inspect(db_engine)
+    regime_cols2 = {c["name"]: c for c in insp2.get_columns("regime_scores")}
+    assert regime_cols2["probability"]["nullable"], "probability must be nullable after upgrade"
+    assert regime_cols2["alert"]["nullable"], "alert must be nullable after upgrade"
+
+    with db_engine.connect() as conn2:
+        ctx2 = MigrationContext.configure(conn2)
+        final_heads = ctx2.get_current_heads()
+    assert "d4e5f6a7b8c9" in final_heads
 
 
 # ── write_quality_flags ───────────────────────────────────────────────────────
