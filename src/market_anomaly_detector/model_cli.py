@@ -889,6 +889,37 @@ def _cmd_activate(args: argparse.Namespace) -> int:
         return 1
 
 
+# ── score-history ─────────────────────────────────────────────────────────────
+
+
+def _cmd_score_history(args: argparse.Namespace) -> int:
+    from pathlib import Path
+
+    from sqlalchemy.orm import Session
+
+    from .db.engine import create_engine
+    from .score_history import run_score_history
+
+    from_date = date.fromisoformat(args.from_date) if args.from_date else None
+    root = Path(args.artifacts_root) if args.artifacts_root else None
+
+    try:
+        engine = create_engine(url=args.database_url)
+        with Session(engine) as session:
+            _require_db_ready(engine)
+            return run_score_history(
+                session=session,
+                version=args.version,
+                from_date=from_date,
+                artifacts_root=root,
+            )
+    except SystemExit:
+        raise
+    except Exception as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+
+
 # ── explain-cases ─────────────────────────────────────────────────────────────
 
 
@@ -1261,6 +1292,36 @@ def main() -> None:
     )
     pac.add_argument("--database-url", default=None, metavar="URL")
 
+    # ── score-history ─────────────────────────────────────────────────────────
+    psh = subparsers.add_parser(
+        "score-history",
+        help=(
+            "Score every W-TUE week from --from to the latest price in the DB and "
+            "write detect + predict rows into regime_scores. Idempotent: re-running "
+            "skips existing rows. Verifies ONNX parity ≤ 1e-5 before writing."
+        ),
+    )
+    psh.add_argument(
+        "--version",
+        default=None,
+        metavar="VERSION",
+        help="Model version to score (default: active detect version).",
+    )
+    psh.add_argument(
+        "--from",
+        dest="from_date",
+        default=None,
+        metavar="DATE",
+        help="First W-TUE date to score, ISO format (default: 2000-01-04).",
+    )
+    psh.add_argument(
+        "--artifacts-root",
+        default=None,
+        metavar="DIR",
+        help="Root directory for artifacts (default: artifacts/).",
+    )
+    psh.add_argument("--database-url", default=None, metavar="URL")
+
     # ── explain-cases ─────────────────────────────────────────────────────────
     pex = subparsers.add_parser(
         "explain-cases",
@@ -1300,6 +1361,8 @@ def main() -> None:
         sys.exit(_cmd_select(args))
     elif args.command == "confirm":
         sys.exit(_cmd_confirm(args))
+    elif args.command == "score-history":
+        sys.exit(_cmd_score_history(args))
     elif args.command == "explain-cases":
         sys.exit(_cmd_explain_cases(args))
     elif args.command == "train":

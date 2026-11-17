@@ -129,50 +129,49 @@ These keep earlier phases compatible with the serving and live stacks:
 
 ---
 
-## 3. Current state (after Phase 1, 2026-10-18)
+## 3. Current state (after Phase 2, 2026-11-16)
 
-**Branches.** `main` holds Phase 0 through Phase 1 Step 5B. Phase 1 Steps 6 and 7
-are on open PRs (`phase-1/step-6-coverage-report`, `phase-1/step-7-stress-parity`).
-Earlier superseded branches (`phase-0/repo-hygiene`, `phase1-fixes`,
-`walk-forward-backtest`) are kept for reference.
+**Branches.** `main` holds Phases 0–2 complete. Earlier superseded branches
+(`phase-0/repo-hygiene`, `phase1-fixes`, `walk-forward-backtest`) are kept for
+reference. Phase 3 (episode analyzer) is next.
 
-**Headline results** (walk-forward backtest, 14 yearly folds, 2008 to 2021-04, 695
-out-of-sample weeks, 153 anomalies; full report in
-`docs/reports/2026-10-10-walk-forward-backtest.md`):
+**Active model.** `v1-2026-11-16-b8c2d65c` (HGB, SPEC_V1, 51 features).
 
-| Model | Precision | Recall | F1 | False-alarm rate |
+**Headline results (Phase 2)**
+
+Development folds 2008–2017 (walk-forward, 10 test years, `docs/reports/2026-10-21-model-selection.md`):
+
+| Model | Event F1 | Episodes caught | Brier | ONNX gate |
 |---|---|---|---|---|
-| Ensemble | 0.72 | 0.56 | 0.63 | 6% |
-| Baseline IsolationForest | 0.32 | 0.75 | 0.45 | 44% |
-| Always flag anomaly | 0.22 | 1.00 | 0.36 | 100% |
+| hgb (selected) | 0.527 | 6/14 | 0.148 | pass |
+| VIX level | 0.511 | 6/14 | 0.161 | n/a |
+| logreg | 0.515 | 6/14 | 0.192 | pass |
 
-Ensemble ROC AUC 0.88 / PR AUC 0.71 (baseline 0.77 / 0.62; prevalence 0.22).
-Year-level bootstrap: F1 difference 95% CI [−0.10, +0.41], P(ensemble better) = 0.92,
-so the improvement is likely but not established. Known failures: **2008 missed
-entirely (0 of 27 anomaly weeks)** and **22 false alarms in 2020**, mostly in
-calm-labelled weeks between and after the 2020 anomaly weeks.
+Confirmation 2018–2021, run once (`docs/reports/2026-10-21-final-confirmation-331acff8.md`):
+
+| Model | Event F1 | Episodes caught | Brier | FA/yr |
+|---|---|---|---|---|
+| hgb | 0.645 | 4/6 | 0.101 | 0.75 |
+| VIX level | 0.625 | 5/6 | 0.175 | 0.75 |
+
+Predict head: 0/6 advance warnings in confirmation (VIX level: 3/6).
 
 | Area | State | Action |
 |---|---|---|
-| Layout | `src/market_anomaly_detector/` (data, splits, pipeline, explain, train, backtest, paths, registry, ingestion, coverage, stress_parity, providers/, db/); top-level `tests/`; `docs/`; `data/raw/`; `scripts/` | Done (Phase 0–1) |
-| Tooling | `pyproject.toml`; `uv.lock` pinned to `requirements.txt` (numpy 2.2.6, scipy 1.15.3, pandas 2.3.1, scikit-learn 1.6.1, shap 0.50.0, joblib 1.5.1); Python 3.12–3.13; ruff; CI on 3.12 and 3.13; commands `mad-train`, `mad-backtest`, `mad-data` | Done (Phase 0–1). Results depend on these versions |
-| Tests | 206 non-network tests passing on 3.13 | Keep green |
-| `data.py` | Features are raw price **levels** + MA crosses + `USD_Over_100` | Stationary features (Phase 2) |
-| `splits.py` / `train.py` | Single 9y/2y/1y split; test year is 60% positive. `train.py` writes a `.meta.json` sidecar | Headline metrics come from the backtest, not this split |
-| `backtest.py` | Expanding-window yearly folds 2008–2021; val window extended back until ≥ 8 anomalies; pooled metrics, trivial baselines, AUCs, bootstrap | Extend in Phase 2: event-level metrics, predict head, new features |
-| `pipeline.py` | IsoForest score → StackingClassifier → calibration (`FrozenEstimator`), method chosen by OOF Brier on the val split | Re-evaluate after features change; verify ONNX export |
-| `explain.py` | SHAP on the RF base learner only (class-1 extraction fixed and tested) | Explain the final model output (Phase 2) |
-| Instrument registry | `config/instruments.yaml` — 50 instruments (42 EWS + 8 stress); Pydantic validation; `mad-data sync-registry` | Done (Phase 1 Step 1) |
-| Database | Postgres via SQLAlchemy 2 + Alembic; instruments, prices, labels, ingestion_runs, quality_flags tables | Done (Phase 1 Step 2) |
-| EWS data loader | `mad-data load-ews` → bloomberg_ews prices and ews_v1 labels; DB frame matches CSV exactly | Done (Phase 1 Step 3) |
-| Live providers | Yahoo, FRED, Cboe with recorded fixtures; retry/backoff; validation flags | Done (Phase 1 Step 4) |
-| Ingestion CLI | `mad-data backfill`, `update`, `status`; PriceSink; per-instrument isolation; staleness | Done (Phase 1 Step 5) |
-| Coverage report | `mad-data report` → `docs/reports/symbol-coverage.md`; fidelity scoring; gap detection (Step 6 PR open) | PR #12 open |
-| Stress parity | `mad-data parity-stress` → compares DB stress series vs stress_extra.csv; exit 1 on non-revised mismatches (Step 7 PR open) | This PR |
-| `scripts/fetch_stress_data.py` | Deleted (replaced by Phase 1 providers) | Done (Phase 1 Step 7) |
-| `data/raw/stress_extra.csv` | Kept as a frozen snapshot (fetch date ≤ 2026-10-13) | Reference for parity check |
+| Layout | `src/market_anomaly_detector/` (all Phase 2 modules added: features/, calibration, selection, hgb_experiments, confirm, explain_v2, final_train, score_history, model_cli); top-level `tests/`; `docs/`; `data/raw/`; `scripts/` | Done (Phase 0–2) |
+| Tooling | `pyproject.toml`; `uv.lock` pinned (numpy 2.2.6, pandas 2.3.1, scikit-learn 1.6.1, shap 0.50.0, skl2onnx 1.20, onnxruntime 1.21.0); Python 3.12–3.13; ruff; CI | Done (Phase 0–2). Results depend on these versions |
+| Tests | All non-network and DB tests passing on 3.13 | Keep green |
+| Feature spec | `features/spec.py` SPEC_V1 (51 cols); `features/build.py` point-in-time `build_from_db`; no-look-ahead tested | Done (Phase 2.1) |
+| Labels / episodes | `labels.py` detect+predict; `episodes.py` merge_gap=2; `docs/reports/episodes-ews_v1.md` | Done (Phase 2.2) |
+| Eval harness v2 | Event-level metrics, predict head, baselines (VIX level/z52, old ensemble); `mad-model baselines` | Done (Phase 2.3) |
+| Candidate selection | HGB / logreg / twostage on dev folds; ONNX gate; selection report | Done (Phase 2.4) |
+| Confirmation | 2018–2021 run once; `mad-model confirm`; run-once guard (config hash) | Done (Phase 2.5) |
+| Explanations | SHAP v2 on final probability; additivity test; 4 case studies | Done (Phase 2.6) |
+| Artifacts / ONNX | `mad-model train/export/activate`; float64 ONNX; parity ≤ 1e-5; 4-migration Alembic chain; model_versions + regime_scores | Done (Phase 2.7–2.8) |
+| Score history | `mad-model score-history`; detect + predict heads; insufficient_data; idempotent; ONNX parity check per batch | Done (Phase 2.8) |
+| Model card | `docs/model-card.md` | Done (Phase 2.8) |
+| Old CSV path | `train.py` / `backtest.py` kept as "old model" baseline; not used for scoring | Kept for reference |
 | Network | Claude's workspace cannot reach Yahoo, FRED, or Cboe (egress policy) | Live fetches run on the user's machine or in GitHub Actions |
-| Lint exemptions | E501 off for `backtest.py` (report f-strings) only; `fetch_stress_data.py` exemption removed | Remaining exemption removed when backtest.py is reworked in Phase 2 |
 
 ---
 
@@ -564,6 +563,12 @@ at the live frequency.
 | 2026-10-18 | Phase 1 Steps 1–5 merged to `main` (registry, DB, EWS loader, providers, ingestion CLI). Steps 6 (coverage report) and 7 (stress parity) on open PRs. |
 | 2026-10-18 | `scripts/fetch_stress_data.py` deleted; `data/raw/stress_extra.csv` kept as a frozen snapshot (fetch date ≤ 2026-10-13). The E501 lint exemption for that script removed from `pyproject.toml`. |
 | 2026-10-18 | `merge_asof` tolerance in `_align_weekly` (coverage report) tightened from 7 to 4 days so a weekly Cboe value can never bridge into the first gap week at the tolerance boundary. |
+| 2026-10-21 | **HGB override:** automated selection rule picked `logreg` (within 1 bootstrap SE of `hgb`, simpler). Overridden because logistic regression breaks in out-of-distribution regimes: in the 2009 and 2010 development folds, Platt `a < 0` (inverted scores) due to linear extrapolation into the unseen 2008 crisis. `hgb` is better on every secondary metric. Documented in `docs/reports/2026-10-21-model-selection.md`. |
+| 2026-10-21 | **2018–2021 confirmation run once:** results are `docs/reports/2026-10-21-final-confirmation-331acff8.md`, committed unedited. Guard is the config hash `331acff8`. |
+| 2026-10-29 | **float64 ONNX export:** HGB trains on float64 data; skl2onnx 1.20 stores thresholds as float32 `nodes_values`. Discrete bp-change grid values round differently, causing split flips across 300 trees (max_diff 0.052 on real data). Fix: `DoubleTensorType` export + extract float64 thresholds from `clf._predictors[i][0].nodes["num_threshold"]` + store as `nodes_values_as_tensor` (ai.onnx.ml opset 3). Parity after fix: 3.3e-9. Triton needs `TYPE_FP64` and onnxruntime ≥ ai.onnx.ml opset 3. |
+| 2026-10-29 | **FRED API path:** JSON API path added, key redacted from logs, fallback tracking; `docs/reports/2026-10-22-timing-diagnostic.md` documents the discovery. |
+| 2026-11-16 | **Score history:** `run_score_history` writes detect (serving) and predict (experimental) rows into `regime_scores` for all scoreable W-TUE weeks. Parity check runs on each batch; alert = None for predict head; insufficient_data rows carry no probability or alert. Migration `d4e5f6a7b8c9` makes probability and alert nullable. |
+| 2026-11-16 | **Deferred v2 items:** VIX level as a feature, hysteresis (Phase 4 serving logic), credit/ex-US features (requires new live sources), turbulence score, week-weighted event precision, documented label rule. None of these unblock Phase 3. |
 
 ---
 
