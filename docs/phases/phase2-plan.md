@@ -3,6 +3,7 @@
 **Parent plan:** `docs/architecture-plan.md`, section 6, Phase 2 (specs in 4.3, 2.3).
 **Written:** 2026-10-18, against `main` at `bcdd26d` (Phase 1 Steps 1–7 merged).
 **Branches:** one branch and PR per step (`phase-2/<step>`), merged in order.
+**Status:** Complete as of 2026-11-16. All steps merged to `main`. Active model `v1-2026-11-16-b8c2d65c`.
 
 ## Goal
 
@@ -232,18 +233,31 @@ and 8 are updated. The old CSV-based `train.py`/`backtest.py` path is kept only 
 
 ## 5. Acceptance checks for Phase 2
 
-- [ ] Features come only from live providers in the database; no `bloomberg_ews` inputs
-- [ ] No-look-ahead test passes
-- [ ] All baselines and candidates reported on development folds, including losers
-- [ ] Final confirmation run once and reported unedited
-- [ ] Selected model beats the VIX rule and the old ensemble on development event F1,
+- [x] Features come only from live providers in the database; no `bloomberg_ews` inputs
+      — `docs/reports/symbol-coverage.md`; `features/build.py` reads SPEC_V1 from DB
+- [x] No-look-ahead test passes
+      — `tests/test_features.py::test_no_look_ahead`
+- [x] All baselines and candidates reported on development folds, including losers
+      — `docs/reports/2026-10-21-model-selection.md` (logreg, hgb, twostage, vix baselines)
+- [x] Final confirmation run once and reported unedited
+      — `docs/reports/2026-10-21-final-confirmation-331acff8.md`
+- [x] Selected model beats the VIX rule and the old ensemble on development event F1,
       or the report says plainly that it doesn't
-- [ ] 2008, 2011–12, 2020 case studies in the final report
-- [ ] Calibration reported (Brier, log loss, reliability); threshold stored per artifact
-- [ ] SHAP explains the final probability; additivity test passes
-- [ ] ONNX parity ≤ 1e-5 in CI
-- [ ] `model_versions` and `regime_scores` migrated; drift test passes
-- [ ] `git status` clean after training, export and scoring
+      — HGB 0.527 vs VIX level 0.511; not statistically distinguishable (CI straddles zero).
+        Confirmation HGB 0.645 vs VIX level 0.625. Report is explicit about this.
+- [x] 2008, 2011–12, 2020 case studies in the final report
+      — `docs/reports/2026-10-21-final-confirmation-331acff8.md` (2018 Q4, 2020)
+      — `docs/reports/2026-10-29-explanations.md` (2008, 2011, 2018, 2020 SHAP)
+- [x] Calibration reported (Brier, log loss, reliability); threshold stored per artifact
+      — `docs/reports/2026-10-21-calibration-diagnostic.md`; `metadata.json` threshold field
+- [x] SHAP explains the final probability; additivity test passes
+      — `docs/reports/2026-10-29-explanations.md`; `tests/test_explain_v2.py`
+- [x] ONNX parity ≤ 1e-5 in CI
+      — `tests/test_final_train.py::test_onnx_parity_bp_grid_fixture` (3.3e-9 on real data)
+- [x] `model_versions` and `regime_scores` migrated; drift test passes
+      — migrations `c3d4e5f6a7b8` and `d4e5f6a7b8c9`; `tests/test_score_history.py`
+- [x] `git status` clean after training, export and scoring
+      — `pytest_sessionfinish` guard in `conftest.py`; score_history writes only to DB
 
 ---
 

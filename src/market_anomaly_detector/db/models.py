@@ -181,8 +181,8 @@ class RegimeScoreRow(Base):
         String(128), ForeignKey("model_versions.version"), primary_key=True
     )
     head: Mapped[str] = mapped_column(String(16), primary_key=True)
-    probability: Mapped[float] = mapped_column(Float)
-    alert: Mapped[bool] = mapped_column(Boolean)
+    probability: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    alert: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
     threshold: Mapped[float] = mapped_column(Float)
     status: Mapped[str] = mapped_column(String(32))
     top_features: Mapped[Optional[str]] = mapped_column(Text, nullable=True)

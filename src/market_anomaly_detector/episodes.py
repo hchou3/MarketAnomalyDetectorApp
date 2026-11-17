@@ -87,6 +87,7 @@ def extract_episodes(
     # Gap is measured between the last week of the previous run and the first
     # week of the next run: gap_weeks = round-trip calendar weeks - 1.
     merged: list[list[int]] = [list(raw_runs[0])]
+
     for start_idx, end_idx in raw_runs[1:]:
         prev_end_idx = merged[-1][1]
         gap_days = (weeks[start_idx] - weeks[prev_end_idx]).days
